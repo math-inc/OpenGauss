@@ -353,27 +353,45 @@ ensure_nodejs() {
 }
 
 ensure_global_cli_tools() {
-    log_info "Installing Claude Code and OpenAI Codex into ~/.local..."
+    log_info "Checking for Claude Code and OpenAI Codex..."
     mkdir -p "$HOME/.local/bin"
-
-    npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@latest >/dev/null 2>&1 \
-        || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code >/dev/null 2>&1
-    npm install -g --prefix "$HOME/.local" @openai/codex@latest >/dev/null 2>&1 \
-        || npm install -g --prefix "$HOME/.local" @openai/codex >/dev/null 2>&1
-
     export PATH="$HOME/.local/bin:$PATH"
 
-    if ! command -v claude >/dev/null 2>&1; then
-        log_error "Claude Code install did not provide a claude executable."
-        exit 1
-    fi
-    if ! command -v codex >/dev/null 2>&1; then
-        log_error "OpenAI Codex install did not provide a codex executable."
-        exit 1
+    # Claude Code — skip if already available (e.g. pixi wrapper, manual install)
+    if command -v claude >/dev/null 2>&1; then
+        log_success "Claude Code already available: $(claude --version 2>/dev/null || printf 'installed')"
+    else
+        log_info "Installing Claude Code via npm..."
+        if npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@latest 2>&1 \
+                || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code 2>&1; then
+            if command -v claude >/dev/null 2>&1; then
+                log_success "Claude Code ready: $(claude --version 2>/dev/null || printf 'installed')"
+            else
+                log_error "Claude Code install did not provide a claude executable."
+                exit 1
+            fi
+        else
+            log_error "Failed to install Claude Code via npm."
+            exit 1
+        fi
     fi
 
-    log_success "Claude Code ready: $(claude --version 2>/dev/null || printf 'installed')"
-    log_success "OpenAI Codex ready: $(codex --version 2>/dev/null || printf 'installed')"
+    # OpenAI Codex — optional, only needed for the codex backend
+    if command -v codex >/dev/null 2>&1; then
+        log_success "OpenAI Codex already available: $(codex --version 2>/dev/null || printf 'installed')"
+    else
+        log_info "Installing OpenAI Codex via npm (optional, for codex backend)..."
+        if npm install -g --prefix "$HOME/.local" @openai/codex@latest 2>&1 \
+                || npm install -g --prefix "$HOME/.local" @openai/codex 2>&1; then
+            if command -v codex >/dev/null 2>&1; then
+                log_success "OpenAI Codex ready: $(codex --version 2>/dev/null || printf 'installed')"
+            else
+                log_warn "OpenAI Codex install did not provide a codex executable (codex backend will not work)."
+            fi
+        else
+            log_warn "Failed to install OpenAI Codex via npm (codex backend will not work)."
+        fi
+    fi
 }
 
 ensure_lean_toolchain() {
