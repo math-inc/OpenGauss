@@ -19,15 +19,16 @@ def test_check_for_updates_uses_cache(tmp_path):
     """When cache is fresh, check_for_updates should return cached value without calling git."""
     from gauss_cli.banner import check_for_updates
 
-    # Create a fake git repo and fresh cache
-    repo_dir = tmp_path / "opengauss-dev"
+    # Create a fake git repo recorded by the installer and fresh cache
+    repo_dir = tmp_path / "checkout"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
+    (tmp_path / "install-root").write_text(str(repo_dir))
 
     cache_file = tmp_path / ".update_check"
     cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3}))
 
-    with patch("gauss_cli.banner.os.getenv", return_value=str(tmp_path)):
+    with patch.dict("os.environ", {"GAUSS_HOME": str(tmp_path)}, clear=False):
         with patch("gauss_cli.banner.subprocess.run") as mock_run:
             result = check_for_updates()
 
@@ -39,9 +40,10 @@ def test_check_for_updates_expired_cache(tmp_path):
     """When cache is expired, check_for_updates should call git fetch."""
     from gauss_cli.banner import check_for_updates
 
-    repo_dir = tmp_path / "opengauss-dev"
+    repo_dir = tmp_path / "checkout"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
+    (tmp_path / "install-root").write_text(str(repo_dir))
 
     # Write an expired cache (timestamp far in the past)
     cache_file = tmp_path / ".update_check"
@@ -49,12 +51,12 @@ def test_check_for_updates_expired_cache(tmp_path):
 
     mock_result = MagicMock(returncode=0, stdout="5\n")
 
-    with patch("gauss_cli.banner.os.getenv", return_value=str(tmp_path)):
+    with patch.dict("os.environ", {"GAUSS_HOME": str(tmp_path)}, clear=False):
         with patch("gauss_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
             result = check_for_updates()
 
     assert result == 5
-    assert mock_run.call_count == 2  # git fetch + git rev-list
+    assert mock_run.call_count == 3  # git fetch + upstream lookup + git rev-list
 
 
 def test_check_for_updates_no_git_dir(tmp_path):
@@ -69,7 +71,7 @@ def test_check_for_updates_no_git_dir(tmp_path):
     original = banner.__file__
     try:
         banner.__file__ = str(fake_banner)
-        with patch("gauss_cli.banner.os.getenv", return_value=str(tmp_path)):
+        with patch.dict("os.environ", {"GAUSS_HOME": str(tmp_path)}, clear=False):
             with patch("gauss_cli.banner.subprocess.run") as mock_run:
                 result = banner.check_for_updates()
         assert result is None
@@ -86,15 +88,33 @@ def test_check_for_updates_fallback_to_project_root():
     if not (project_root / ".git").exists():
         pytest.skip("Not running from a git checkout")
 
-    # Point GAUSS_HOME/GAUSS_HOME at a temp dir with no opengauss-dev/.git
+    # Point GAUSS_HOME at a temp dir with no recorded install root.
     import tempfile
     with tempfile.TemporaryDirectory() as td:
-        with patch("gauss_cli.banner.os.getenv", return_value=td):
+        with patch.dict("os.environ", {"GAUSS_HOME": td}, clear=False):
             with patch("gauss_cli.banner.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stdout="0\n")
                 result = banner.check_for_updates()
         # Should have fallen back to project root and run git commands
         assert mock_run.call_count >= 1
+
+
+def test_check_for_updates_legacy_home_checkout_still_works(tmp_path):
+    """Older ~/.gauss/opengauss-dev installs still resolve for update checks."""
+    from gauss_cli.banner import check_for_updates
+
+    legacy_repo = tmp_path / "opengauss-dev"
+    legacy_repo.mkdir()
+    (legacy_repo / ".git").mkdir()
+
+    mock_result = MagicMock(returncode=0, stdout="2\n")
+
+    with patch.dict("os.environ", {"GAUSS_HOME": str(tmp_path)}, clear=False):
+        with patch("gauss_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
+            result = check_for_updates()
+
+    assert result == 2
+    assert mock_run.call_count == 3
 
 
 def test_prefetch_non_blocking():

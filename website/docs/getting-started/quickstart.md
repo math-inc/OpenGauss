@@ -9,10 +9,11 @@ description: "Install Gauss, select a project, and launch the managed Lean prove
 ## 1. Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/math-inc/opengauss-dev/main/scripts/install.sh | bash
+# From the root of a checked-out math-inc/opengauss repository
+./scripts/install.sh
 ```
 
-The installer defaults to `~/.gauss/` and exposes `gauss` as the primary command. `gauss` remains as a compatibility alias.
+The installer targets Linux checkouts, defaults runtime state to `~/.gauss/`, exposes `gauss` via `~/.local/bin/gauss`, and prewarms `~/GaussWorkspace`. Run `gauss-open-session` if you want the batteries-included launcher; run `gauss` directly if you prefer the raw CLI.
 
 ## 2. Open the CLI
 

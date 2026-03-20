@@ -51,10 +51,11 @@ Gauss discovers `.gauss/project.yaml` upward from the current working directory,
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/math-inc/opengauss-dev/main/scripts/install.sh | bash
+# From the root of a checked-out math-inc/opengauss repository
+./scripts/install.sh
 ```
 
-The installer defaults to `~/.gauss/` and exposes `gauss` as the primary command. The legacy `gauss` command is still installed as a compatibility alias.
+This workflow-derived installer targets Linux checkouts, with Ubuntu, Debian, and WSL as the primary supported environments. It keeps the code in your existing repository checkout, defaults runtime state to `~/.gauss/`, exposes `gauss` through `~/.local/bin/gauss`, prewarms `~/GaussWorkspace`, and writes helper commands such as `gauss-open-session` and `gauss-open-guide`.
 
 ## First run
 
@@ -112,9 +113,9 @@ These commands keep the underlying Lean workflow semantics. Gauss adds project s
 ## Compatibility notes
 
 - `gauss` is the primary command
-- `gauss` remains available as a compatibility alias
+- `gauss update` expects the active CLI to come from a checked-out `math-inc/opengauss` git repository
 - Fresh installs default to `~/.gauss/`
-- If you already have `~/.gauss/` and no `~/.gauss/`, Gauss keeps using the legacy directory until you migrate
+- If you already have `~/.gauss/`, the installer reuses it
 - `/handoff` remains available as a compatibility alias for `/autoformalize`
 
 ## Prerequisites for managed workflows

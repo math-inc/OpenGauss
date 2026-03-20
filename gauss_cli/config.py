@@ -56,6 +56,29 @@ def get_env_path() -> Path:
     """Get the .env file path (for API keys)."""
     return get_gauss_home() / ".env"
 
+def get_install_root_path() -> Path:
+    """Get the file path that records the installed repository root."""
+    return get_gauss_home() / "install-root"
+
+def get_installed_repo_root() -> Optional[Path]:
+    """Return the repository root recorded by the installer, if available."""
+    explicit_install_root = os.getenv("GAUSS_INSTALL_ROOT")
+    if explicit_install_root:
+        return Path(explicit_install_root).expanduser()
+
+    install_root_path = get_install_root_path()
+    if not install_root_path.exists():
+        return None
+
+    try:
+        raw_value = install_root_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+    if not raw_value:
+        return None
+    return Path(raw_value).expanduser()
+
 def get_project_root() -> Path:
     """Get the project installation directory."""
     return Path(__file__).parent.parent.resolve()

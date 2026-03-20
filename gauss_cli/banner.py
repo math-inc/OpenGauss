@@ -180,18 +180,31 @@ def check_for_updates() -> Optional[int]:
     ``~/.gauss/.update_check``).  Returns the number of commits behind,
     or ``None`` if the check fails or isn't applicable.
     """
-    gauss_home = Path(
-        os.getenv("GAUSS_HOME")
-        or os.getenv("GAUSS_HOME")
-        or (Path.home() / ".gauss")
-    )
-    repo_dir = gauss_home / "opengauss-dev"
+    from gauss_cli.config import get_gauss_home, get_installed_repo_root
+
+    gauss_home = get_gauss_home()
     cache_file = gauss_home / ".update_check"
 
-    # Must be a git repo — fall back to project root for dev installs
-    if not (repo_dir / ".git").exists():
-        repo_dir = Path(__file__).parent.parent.resolve()
-    if not (repo_dir / ".git").exists():
+    candidate_repo_dirs: list[Path] = []
+    installed_repo_root = get_installed_repo_root()
+    if installed_repo_root is not None:
+        candidate_repo_dirs.append(installed_repo_root.expanduser())
+    candidate_repo_dirs.append(gauss_home / "opengauss")
+    candidate_repo_dirs.append(gauss_home / "opengauss-dev")
+    candidate_repo_dirs.append(Path(__file__).parent.parent.resolve())
+
+    repo_dir = None
+    seen: set[Path] = set()
+    for candidate in candidate_repo_dirs:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if (resolved / ".git").exists():
+            repo_dir = resolved
+            break
+
+    if repo_dir is None:
         return None
 
     # Read cache

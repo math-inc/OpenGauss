@@ -1,120 +1,92 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ============================================================================
-# Gauss Installer
+# Open Gauss Workflow Installer
 # ============================================================================
-# Installation script for Linux and macOS.
-# Uses uv for fast Python provisioning and package management.
+# Repository-local installer distilled from the "Open Gauss Batteries Included
+# Devbox" workflow.
+#
+# Supported contract:
+# - Run from the root of a checked-out math-inc/opengauss repository.
+# - Linux only. Ubuntu/Debian/WSL are the primary supported environments.
+# - Automatic system package installation is only supported on Debian/Ubuntu.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/math-inc/opengauss-dev/main/scripts/install.sh | bash
-#
-# Or with options:
-#   curl -fsSL ... | bash -s -- --no-venv --skip-setup
+#   ./scripts/install.sh
+#   ./scripts/install.sh --workspace-dir "$HOME/GaussWorkspace"
+#   ./scripts/install.sh --gauss-home "$HOME/.gauss"
 #
 # ============================================================================
 
-set -e
+set -euo pipefail
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+MAGENTA='\033[0;35m'
 BOLD='\033[1m'
+NC='\033[0m'
 
-# Configuration
-REPO_URL_SSH="git@github.com:math-inc/opengauss-dev.git"
-REPO_URL_HTTPS="https://github.com/math-inc/opengauss-dev.git"
-GAUSS_HOME="${GAUSS_HOME:-$HOME/.gauss}"
-INSTALL_DIR="${GAUSS_INSTALL_DIR:-$GAUSS_HOME/opengauss-dev}"
 PYTHON_VERSION="3.11"
-NODE_VERSION="22"
+NODE_MAJOR="22"
 
-# Options
-USE_VENV=true
-RUN_SETUP=true
-BRANCH="main"
-INSTALL_PROFILE="lite"  # lite (default) | full
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Detect non-interactive mode (e.g. curl | bash)
-# When stdin is not a terminal, read -p will fail with EOF,
-# causing set -e to silently abort the entire script.
-if [ -t 0 ]; then
-    IS_INTERACTIVE=true
-else
-    IS_INTERACTIVE=false
-fi
+GAUSS_HOME="${GAUSS_HOME:-$HOME/.gauss}"
+WORKSPACE_DIR="${GAUSS_WORKSPACE_DIR:-$HOME/GaussWorkspace}"
+RECREATE_VENV=false
+SKIP_SYSTEM_PACKAGES=false
 
-# Parse arguments
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --no-venv)
-            USE_VENV=false
-            shift
-            ;;
-        --skip-setup)
-            RUN_SETUP=false
-            shift
-            ;;
-        --branch)
-            BRANCH="$2"
-            shift 2
-            ;;
-        --dir)
-            INSTALL_DIR="$2"
-            shift 2
-            ;;
-        --full)
-            INSTALL_PROFILE="full"
-            shift
-            ;;
-        -h|--help)
-            echo "Gauss Installer"
-            echo ""
-            echo "Usage: install.sh [OPTIONS]"
-            echo ""
-            echo "Options:"
-            echo "  --no-venv      Don't create virtual environment"
-            echo "  --skip-setup   Skip interactive setup wizard"
-            echo "  --full         Install extra tools (browser/web/voice/etc.)"
-            echo "  --branch NAME  Git branch to install (default: main)"
-            echo "  --dir PATH     Installation directory (default: ~/.gauss/opengauss-dev)"
-            echo "  -h, --help     Show this help"
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
-    esac
-done
+OS=""
+DISTRO=""
+DEBIAN_LIKE=false
+UV_CMD=""
+FILE_PYTHON="python3"
+VENV_DIR=""
+VENV_BIN=""
+VENV_PYTHON=""
+GAUSS_BIN=""
+GUIDE_DIR=""
+INSTALL_ROOT_FILE=""
 
-# Installation profile toggles
-EXTRAS="lite"
-INSTALL_SUBMODULES=false
-INSTALL_NODE_DEPS=false
-INSTALL_FFMPEG=false
-if [ "$INSTALL_PROFILE" = "full" ]; then
-    EXTRAS="full"
-    INSTALL_SUBMODULES=true
-    INSTALL_NODE_DEPS=true
-    INSTALL_FFMPEG=true
-fi
+usage() {
+    cat <<'TXT'
+Open Gauss Workflow Installer
 
-# ============================================================================
-# Helper functions
-# ============================================================================
+Run this script from the root of a checked-out math-inc/opengauss repository.
+
+Options:
+  --gauss-home PATH       Override the Gauss home directory (default: ~/.gauss)
+  --workspace-dir PATH    Override the prewarmed Lean workspace path
+                          (default: ~/GaussWorkspace)
+  --skip-system-packages  Do not run apt-get even on Debian/Ubuntu
+  --recreate-venv         Remove and recreate the repository virtualenv
+  -h, --help              Show this help
+
+Environment:
+  GAUSS_HOME              Same as --gauss-home
+  GAUSS_WORKSPACE_DIR     Same as --workspace-dir
+
+Optional staged provider keys:
+  OPENROUTER_API_KEY
+  OPENAI_API_KEY
+  ANTHROPIC_API_KEY
+
+Behavior:
+  Exported non-empty provider keys are written to ~/.gauss/.env.
+  Unset provider keys leave existing ~/.gauss/.env values untouched.
+  Export a provider key as an empty string to clear the staged value.
+TXT
+}
 
 print_banner() {
-    echo ""
+    echo
     echo -e "${MAGENTA}${BOLD}"
     echo "┌─────────────────────────────────────────────────────────┐"
-    echo "│                  ∑ Gauss Installer                     │"
+    echo "│        ∑ Open Gauss Workflow Installer                 │"
     echo "├─────────────────────────────────────────────────────────┤"
-    echo "│  Lean autoformalization workspace by Math Inc.          │"
+    echo "│  Repository-local, Lean-ready batteries included       │"
     echo "└─────────────────────────────────────────────────────────┘"
     echo -e "${NC}"
 }
@@ -135,1057 +107,1144 @@ log_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
-# ============================================================================
-# System detection
-# ============================================================================
+refresh_paths() {
+    VENV_DIR="$REPO_ROOT/venv"
+    VENV_BIN="$VENV_DIR/bin"
+    VENV_PYTHON="$VENV_BIN/python"
+    GUIDE_DIR="$GAUSS_HOME/guide"
+    INSTALL_ROOT_FILE="$GAUSS_HOME/install-root"
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gauss-home)
+                GAUSS_HOME="$2"
+                shift 2
+                ;;
+            --workspace-dir)
+                WORKSPACE_DIR="$2"
+                shift 2
+                ;;
+            --skip-system-packages)
+                SKIP_SYSTEM_PACKAGES=true
+                shift
+                ;;
+            --recreate-venv)
+                RECREATE_VENV=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    refresh_paths
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+        return
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+        return
+    fi
+    log_error "System package installation requires root or sudo."
+    exit 1
+}
 
 detect_os() {
     case "$(uname -s)" in
         Linux*)
             OS="linux"
             if [ -f /etc/os-release ]; then
+                # shellcheck disable=SC1091
                 . /etc/os-release
-                DISTRO="$ID"
+                DISTRO="${ID:-unknown}"
             else
                 DISTRO="unknown"
             fi
             ;;
         Darwin*)
-            OS="macos"
-            DISTRO="macos"
-            ;;
-        CYGWIN*|MINGW*|MSYS*)
-            OS="windows"
-            DISTRO="windows"
-            log_error "Windows detected. Please use the PowerShell installer:"
-            log_info "  irm https://raw.githubusercontent.com/math-inc/opengauss-dev/main/scripts/install.ps1 | iex"
+            log_error "This workflow-derived installer is Linux-only."
+            log_info "Use a Linux checkout (Ubuntu/Debian/WSL recommended) and rerun ./scripts/install.sh."
             exit 1
             ;;
         *)
-            OS="unknown"
-            DISTRO="unknown"
-            log_warn "Unknown operating system"
+            log_error "Unsupported operating system: $(uname -s)"
+            log_info "Use a Linux checkout (Ubuntu/Debian/WSL recommended) and rerun ./scripts/install.sh."
+            exit 1
             ;;
     esac
 
-    log_success "Detected: $OS ($DISTRO)"
+    case "$DISTRO" in
+        ubuntu|debian)
+            DEBIAN_LIKE=true
+            ;;
+    esac
+
+    log_success "Detected Linux environment ($DISTRO)"
 }
 
-# ============================================================================
-# Dependency checks
-# ============================================================================
+require_repo_checkout() {
+    local required_paths=(
+        "$REPO_ROOT/pyproject.toml"
+        "$REPO_ROOT/gauss_cli/main.py"
+        "$REPO_ROOT/docs/skins/mathinc.yaml"
+        "$REPO_ROOT/package.json"
+        "$REPO_ROOT/package-lock.json"
+    )
 
-install_uv() {
-    log_info "Checking for uv package manager..."
+    if [ ! -e "$REPO_ROOT/.git" ]; then
+        log_error "Expected a git checkout at $REPO_ROOT."
+        log_info "Clone math-inc/opengauss and run ./scripts/install.sh from that repository."
+        exit 1
+    fi
 
-    # Check common locations for uv
-    if command -v uv &> /dev/null; then
+    for path in "${required_paths[@]}"; do
+        if [ ! -e "$path" ]; then
+            log_error "Repository validation failed. Missing: $path"
+            exit 1
+        fi
+    done
+
+    if ! git -C "$REPO_ROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
+        log_error "$REPO_ROOT is not a valid git checkout."
+        exit 1
+    fi
+
+    log_success "Repository checkout validated: $REPO_ROOT"
+}
+
+ensure_local_bin_path() {
+    mkdir -p "$HOME/.local/bin"
+    export PATH="$HOME/.local/bin:$PATH"
+}
+
+ensure_required_commands() {
+    local missing=()
+    local commands=(bash curl git gcc jq make pkg-config python3 rg tmux unzip xz zip ffmpeg)
+    local cmd
+    for cmd in "${commands[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        return
+    fi
+
+    log_error "Missing required commands: ${missing[*]}"
+    if [ "$DEBIAN_LIKE" = true ]; then
+        log_info "Run without --skip-system-packages or install them manually with apt-get."
+    else
+        log_info "Install the missing tools manually and rerun the installer."
+        log_info "Ubuntu/Debian/WSL are the primary supported environments for this workflow-derived install path."
+    fi
+    exit 1
+}
+
+install_system_packages() {
+    if [ "$SKIP_SYSTEM_PACKAGES" = true ]; then
+        log_info "Skipping apt-get bootstrap (--skip-system-packages)"
+        ensure_required_commands
+        return
+    fi
+
+    if [ "$DEBIAN_LIKE" != true ]; then
+        log_warn "Automatic system package installation is only supported on Debian/Ubuntu."
+        ensure_required_commands
+        return
+    fi
+
+    local packages=(
+        build-essential
+        ca-certificates
+        curl
+        ffmpeg
+        git
+        gnupg
+        jq
+        libffi-dev
+        pkg-config
+        python3
+        python3-dev
+        python3-pip
+        python3-venv
+        ripgrep
+        tmux
+        unzip
+        xz-utils
+        zip
+    )
+
+    log_info "Installing Debian/Ubuntu workflow prerequisites..."
+    export DEBIAN_FRONTEND=noninteractive
+    run_root apt-get update -y
+    run_root apt-get install -y --no-install-recommends "${packages[@]}"
+    ensure_required_commands
+    log_success "System packages are ready"
+}
+
+ensure_uv() {
+    log_info "Ensuring uv is available..."
+
+    if command -v uv >/dev/null 2>&1; then
         UV_CMD="uv"
-        UV_VERSION=$($UV_CMD --version 2>/dev/null)
-        log_success "uv found ($UV_VERSION)"
-        return 0
-    fi
-
-    # Check ~/.local/bin (default uv install location) even if not on PATH yet
-    if [ -x "$HOME/.local/bin/uv" ]; then
+    elif [ -x "$HOME/.local/bin/uv" ]; then
         UV_CMD="$HOME/.local/bin/uv"
-        UV_VERSION=$($UV_CMD --version 2>/dev/null)
-        log_success "uv found at ~/.local/bin ($UV_VERSION)"
-        return 0
-    fi
-
-    # Check ~/.cargo/bin (alternative uv install location)
-    if [ -x "$HOME/.cargo/bin/uv" ]; then
+    elif [ -x "$HOME/.cargo/bin/uv" ]; then
         UV_CMD="$HOME/.cargo/bin/uv"
-        UV_VERSION=$($UV_CMD --version 2>/dev/null)
-        log_success "uv found at ~/.cargo/bin ($UV_VERSION)"
-        return 0
-    fi
-
-    # Install uv
-    log_info "Installing uv (fast Python package manager)..."
-    if curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null; then
-        # uv installs to ~/.local/bin by default
+    else
+        log_info "Installing uv..."
+        if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+            log_error "Failed to install uv."
+            exit 1
+        fi
         if [ -x "$HOME/.local/bin/uv" ]; then
             UV_CMD="$HOME/.local/bin/uv"
         elif [ -x "$HOME/.cargo/bin/uv" ]; then
             UV_CMD="$HOME/.cargo/bin/uv"
-        elif command -v uv &> /dev/null; then
-            UV_CMD="uv"
         else
-            log_error "uv installed but not found on PATH"
-            log_info "Try adding ~/.local/bin to your PATH and re-running"
+            log_error "uv installed but could not be located."
             exit 1
         fi
-        UV_VERSION=$($UV_CMD --version 2>/dev/null)
-        log_success "uv installed ($UV_VERSION)"
-    else
-        log_error "Failed to install uv"
-        log_info "Install manually: https://docs.astral.sh/uv/getting-started/installation/"
+    fi
+
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    log_success "uv ready: $($UV_CMD --version)"
+}
+
+node_major_version() {
+    node -p 'process.versions.node.split(".")[0]'
+}
+
+ensure_nodejs() {
+    log_info "Ensuring Node.js ${NODE_MAJOR}.x is available..."
+
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        local current_major
+        current_major="$(node_major_version)"
+        if [ "$current_major" -ge "$NODE_MAJOR" ]; then
+            log_success "Node.js ready: $(node -v)"
+            return
+        fi
+    fi
+
+    if [ "$DEBIAN_LIKE" != true ]; then
+        log_error "Node.js ${NODE_MAJOR}.x is required."
+        log_info "Install Node.js ${NODE_MAJOR}.x and npm manually, then rerun ./scripts/install.sh."
         exit 1
     fi
+
+    log_info "Installing Node.js ${NODE_MAJOR}.x via NodeSource..."
+    run_root bash -lc 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash -'
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+    log_success "Node.js ready: $(node -v)"
 }
 
-check_python() {
-    log_info "Checking Python $PYTHON_VERSION..."
-
-    # Let uv handle Python — it can download and manage Python versions
-    # First check if a suitable Python is already available
-    if $UV_CMD python find "$PYTHON_VERSION" &> /dev/null; then
-        PYTHON_PATH=$($UV_CMD python find "$PYTHON_VERSION")
-        PYTHON_FOUND_VERSION=$($PYTHON_PATH --version 2>/dev/null)
-        log_success "Python found: $PYTHON_FOUND_VERSION"
-        return 0
-    fi
-
-    # Python not found — use uv to install it (no sudo needed!)
-    log_info "Python $PYTHON_VERSION not found, installing via uv..."
-    if $UV_CMD python install "$PYTHON_VERSION"; then
-        PYTHON_PATH=$($UV_CMD python find "$PYTHON_VERSION")
-        PYTHON_FOUND_VERSION=$($PYTHON_PATH --version 2>/dev/null)
-        log_success "Python installed: $PYTHON_FOUND_VERSION"
-    else
-        log_error "Failed to install Python $PYTHON_VERSION"
-        log_info "Install Python $PYTHON_VERSION manually, then re-run this script"
-        exit 1
-    fi
-}
-
-check_git() {
-    log_info "Checking Git..."
-
-    if command -v git &> /dev/null; then
-        GIT_VERSION=$(git --version | awk '{print $3}')
-        log_success "Git $GIT_VERSION found"
-        return 0
-    fi
-
-    log_error "Git not found"
-    log_info "Please install Git:"
-
-    case "$OS" in
-        linux)
-            case "$DISTRO" in
-                ubuntu|debian)
-                    log_info "  sudo apt update && sudo apt install git"
-                    ;;
-                fedora)
-                    log_info "  sudo dnf install git"
-                    ;;
-                arch)
-                    log_info "  sudo pacman -S git"
-                    ;;
-                *)
-                    log_info "  Use your package manager to install git"
-                    ;;
-            esac
-            ;;
-        macos)
-            log_info "  xcode-select --install"
-            log_info "  Or: brew install git"
-            ;;
-    esac
-
-    exit 1
-}
-
-check_node() {
-    log_info "Checking Node.js..."
-
-    if command -v node &> /dev/null; then
-        local found_ver=$(node --version)
-        log_success "Node.js $found_ver found"
-        HAS_NODE=true
-        return 0
-    fi
-
-    # Check our own managed install from a previous run
-    if [ -x "$GAUSS_HOME/node/bin/node" ]; then
-        export PATH="$GAUSS_HOME/node/bin:$PATH"
-        local found_ver=$("$GAUSS_HOME/node/bin/node" --version)
-        log_success "Node.js $found_ver found (Gauss-managed)"
-        HAS_NODE=true
-        return 0
-    fi
-
-    log_info "Node.js not found — installing Node.js $NODE_VERSION LTS..."
-    install_node
-}
-
-check_claude_code() {
-    log_info "Checking Claude Code CLI..."
-
-    if command -v claude &> /dev/null; then
-        local claude_ver
-        claude_ver=$(claude --version 2>/dev/null || true)
-        if [ -n "$claude_ver" ]; then
-            log_success "Claude Code found ($claude_ver)"
-        else
-            log_success "Claude Code found"
-        fi
-        return 0
-    fi
-
-    if ! command -v npm &> /dev/null; then
-        log_info "Claude Code not found. Installing it requires Node.js + npm."
-        check_node
-    fi
-
-    if command -v npm &> /dev/null; then
-        log_info "Installing Claude Code CLI (@anthropic-ai/claude-code)..."
-        mkdir -p "$HOME/.local/bin"
-        npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@latest 2>/dev/null \
-            || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code
-        export PATH="$HOME/.local/bin:$PATH"
-        if command -v claude &> /dev/null; then
-            log_success "Claude Code installed"
-        else
-            log_warn "Claude Code installed, but the 'claude' command is not on PATH yet"
-        fi
-        return 0
-    fi
-
-    log_warn "Claude Code not found and npm is unavailable"
-    log_info "Install Claude Code manually and re-run:"
-    log_info "  npm install -g @anthropic-ai/claude-code"
-    return 0
-}
-
-install_node() {
-    local arch=$(uname -m)
-    local node_arch
-    case "$arch" in
-        x86_64)        node_arch="x64"    ;;
-        aarch64|arm64) node_arch="arm64"  ;;
-        armv7l)        node_arch="armv7l" ;;
-        *)
-            log_warn "Unsupported architecture ($arch) for Node.js auto-install"
-            log_info "Install manually: https://nodejs.org/en/download/"
-            HAS_NODE=false
-            return 0
-            ;;
-    esac
-
-    local node_os
-    case "$OS" in
-        linux) node_os="linux"  ;;
-        macos) node_os="darwin" ;;
-        *)
-            log_warn "Unsupported OS for Node.js auto-install"
-            HAS_NODE=false
-            return 0
-            ;;
-    esac
-
-    # Resolve the latest v22.x.x tarball name from the index page
-    local index_url="https://nodejs.org/dist/latest-v${NODE_VERSION}.x/"
-    local tarball_name
-    tarball_name=$(curl -fsSL "$index_url" \
-        | grep -oE "node-v${NODE_VERSION}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.xz" \
-        | head -1)
-
-    # Fallback to .tar.gz if .tar.xz not available
-    if [ -z "$tarball_name" ]; then
-        tarball_name=$(curl -fsSL "$index_url" \
-            | grep -oE "node-v${NODE_VERSION}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.gz" \
-            | head -1)
-    fi
-
-    if [ -z "$tarball_name" ]; then
-        log_warn "Could not find Node.js $NODE_VERSION binary for $node_os-$node_arch"
-        log_info "Install manually: https://nodejs.org/en/download/"
-        HAS_NODE=false
-        return 0
-    fi
-
-    local download_url="${index_url}${tarball_name}"
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-
-    log_info "Downloading $tarball_name..."
-    if ! curl -fsSL "$download_url" -o "$tmp_dir/$tarball_name"; then
-        log_warn "Download failed"
-        rm -rf "$tmp_dir"
-        HAS_NODE=false
-        return 0
-    fi
-
-    log_info "Extracting to $GAUSS_HOME/node/..."
-    if [[ "$tarball_name" == *.tar.xz ]]; then
-        tar xf "$tmp_dir/$tarball_name" -C "$tmp_dir"
-    else
-        tar xzf "$tmp_dir/$tarball_name" -C "$tmp_dir"
-    fi
-
-    local extracted_dir
-    extracted_dir=$(ls -d "$tmp_dir"/node-v* 2>/dev/null | head -1)
-
-    if [ ! -d "$extracted_dir" ]; then
-        log_warn "Extraction failed"
-        rm -rf "$tmp_dir"
-        HAS_NODE=false
-        return 0
-    fi
-
-    # Place into the active home directory and symlink binaries to ~/.local/bin/
-    rm -rf "$GAUSS_HOME/node"
-    mkdir -p "$GAUSS_HOME"
-    mv "$extracted_dir" "$GAUSS_HOME/node"
-    rm -rf "$tmp_dir"
-
+ensure_global_cli_tools() {
+    log_info "Installing Claude Code and OpenAI Codex into ~/.local..."
     mkdir -p "$HOME/.local/bin"
-    ln -sf "$GAUSS_HOME/node/bin/node" "$HOME/.local/bin/node"
-    ln -sf "$GAUSS_HOME/node/bin/npm"  "$HOME/.local/bin/npm"
-    ln -sf "$GAUSS_HOME/node/bin/npx"  "$HOME/.local/bin/npx"
 
-    export PATH="$GAUSS_HOME/node/bin:$PATH"
+    npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@latest >/dev/null 2>&1 \
+        || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code >/dev/null 2>&1
+    npm install -g --prefix "$HOME/.local" @openai/codex@latest >/dev/null 2>&1 \
+        || npm install -g --prefix "$HOME/.local" @openai/codex >/dev/null 2>&1
 
-    local installed_ver
-    installed_ver=$("$GAUSS_HOME/node/bin/node" --version 2>/dev/null)
-    log_success "Node.js $installed_ver installed to $GAUSS_HOME/node/"
-    HAS_NODE=true
-}
-
-install_system_packages() {
-    # Detect what's missing
-    HAS_RIPGREP=false
-    HAS_FFMPEG=false
-    local need_ripgrep=false
-    local need_ffmpeg=false
-
-    log_info "Checking ripgrep (fast file search)..."
-    if command -v rg &> /dev/null; then
-        log_success "$(rg --version | head -1) found"
-        HAS_RIPGREP=true
-    else
-        need_ripgrep=true
-    fi
-
-    log_info "Checking ffmpeg (TTS voice messages)..."
-    if [ "$INSTALL_FFMPEG" = true ]; then
-        if command -v ffmpeg &> /dev/null; then
-            local ffmpeg_ver=$(ffmpeg -version 2>/dev/null | head -1 | awk '{print $3}')
-            log_success "ffmpeg $ffmpeg_ver found"
-            HAS_FFMPEG=true
-        else
-            need_ffmpeg=true
-        fi
-    else
-        log_info "Skipping ffmpeg system dependency (lite profile)"
-        HAS_FFMPEG=true
-    fi
-
-    # Nothing to install — done
-    if [ "$need_ripgrep" = false ] && [ "$need_ffmpeg" = false ]; then
-        return 0
-    fi
-
-    # Build a human-readable description + package list
-    local desc_parts=()
-    local pkgs=()
-    if [ "$need_ripgrep" = true ]; then
-        desc_parts+=("ripgrep for faster file search")
-        pkgs+=("ripgrep")
-    fi
-    if [ "$need_ffmpeg" = true ]; then
-        desc_parts+=("ffmpeg for TTS voice messages")
-        pkgs+=("ffmpeg")
-    fi
-    local description
-    description=$(IFS=" and "; echo "${desc_parts[*]}")
-
-    # ── macOS: brew ──
-    if [ "$OS" = "macos" ]; then
-        if command -v brew &> /dev/null; then
-            log_info "Installing ${pkgs[*]} via Homebrew..."
-            if brew install "${pkgs[@]}"; then
-                [ "$need_ripgrep" = true ] && HAS_RIPGREP=true && log_success "ripgrep installed"
-                [ "$need_ffmpeg" = true ]  && HAS_FFMPEG=true  && log_success "ffmpeg installed"
-                return 0
-            fi
-        fi
-        log_warn "Could not auto-install (brew not found or install failed)"
-        log_info "Install manually: brew install ${pkgs[*]}"
-        return 0
-    fi
-
-    # ── Linux: resolve package manager command ──
-    local pkg_install=""
-    case "$DISTRO" in
-        ubuntu|debian) pkg_install="apt install -y"   ;;
-        fedora)        pkg_install="dnf install -y"   ;;
-        arch)          pkg_install="pacman -S --noconfirm" ;;
-    esac
-
-    if [ -n "$pkg_install" ]; then
-        local install_cmd="$pkg_install ${pkgs[*]}"
-
-        # Prevent needrestart/whiptail dialogs from blocking non-interactive installs
-        case "$DISTRO" in
-            ubuntu|debian) export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a ;;
-        esac
-
-        # Already root — just install
-        if [ "$(id -u)" -eq 0 ]; then
-            log_info "Installing ${pkgs[*]}..."
-            if $install_cmd; then
-                [ "$need_ripgrep" = true ] && HAS_RIPGREP=true && log_success "ripgrep installed"
-                [ "$need_ffmpeg" = true ]  && HAS_FFMPEG=true  && log_success "ffmpeg installed"
-                return 0
-            fi
-        # Passwordless sudo — just install
-        elif command -v sudo &> /dev/null && sudo -n true 2>/dev/null; then
-            log_info "Installing ${pkgs[*]}..."
-            if sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a $install_cmd; then
-                [ "$need_ripgrep" = true ] && HAS_RIPGREP=true && log_success "ripgrep installed"
-                [ "$need_ffmpeg" = true ]  && HAS_FFMPEG=true  && log_success "ffmpeg installed"
-                return 0
-            fi
-        # sudo needs password — ask once for everything
-        elif command -v sudo &> /dev/null; then
-            if [ "$IS_INTERACTIVE" = true ]; then
-                echo ""
-                read -p "Install ${description}? (requires sudo) [y/N] " -n 1 -r
-                echo
-                if [[ $REPLY =~ ^[Yy]$ ]]; then
-                    if sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a $install_cmd; then
-                        [ "$need_ripgrep" = true ] && HAS_RIPGREP=true && log_success "ripgrep installed"
-                        [ "$need_ffmpeg" = true ]  && HAS_FFMPEG=true  && log_success "ffmpeg installed"
-                        return 0
-                    fi
-                fi
-            elif [ -e /dev/tty ]; then
-                # Non-interactive (e.g. curl | bash) but a terminal is available.
-                # Read the prompt from /dev/tty (same approach the setup wizard uses).
-                echo ""
-                log_info "Installing ${description} requires sudo."
-                read -p "Install? [Y/n] " -n 1 -r < /dev/tty
-                echo
-                if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-                    if sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a $install_cmd < /dev/tty; then
-                        [ "$need_ripgrep" = true ] && HAS_RIPGREP=true && log_success "ripgrep installed"
-                        [ "$need_ffmpeg" = true ]  && HAS_FFMPEG=true  && log_success "ffmpeg installed"
-                        return 0
-                    fi
-                fi
-            else
-                log_warn "Non-interactive mode and no terminal available — cannot install system packages"
-                log_info "Install manually after setup completes: sudo $install_cmd"
-            fi
-        fi
-    fi
-
-    # ── Fallback for ripgrep: cargo ──
-    if [ "$need_ripgrep" = true ] && [ "$HAS_RIPGREP" = false ]; then
-        if command -v cargo &> /dev/null; then
-            log_info "Trying cargo install ripgrep (no sudo needed)..."
-            if cargo install ripgrep; then
-                log_success "ripgrep installed via cargo"
-                HAS_RIPGREP=true
-            fi
-        fi
-    fi
-
-    # ── Show manual instructions for anything still missing ──
-    if [ "$HAS_RIPGREP" = false ] && [ "$need_ripgrep" = true ]; then
-        log_warn "ripgrep not installed (file search will use grep fallback)"
-        show_manual_install_hint "ripgrep"
-    fi
-    if [ "$HAS_FFMPEG" = false ] && [ "$need_ffmpeg" = true ]; then
-        log_warn "ffmpeg not installed (TTS voice messages will be limited)"
-        show_manual_install_hint "ffmpeg"
-    fi
-}
-
-show_manual_install_hint() {
-    local pkg="$1"
-    log_info "To install $pkg manually:"
-    case "$OS" in
-        linux)
-            case "$DISTRO" in
-                ubuntu|debian) log_info "  sudo apt install $pkg" ;;
-                fedora)        log_info "  sudo dnf install $pkg" ;;
-                arch)          log_info "  sudo pacman -S $pkg"   ;;
-                *)             log_info "  Use your package manager or visit the project homepage" ;;
-            esac
-            ;;
-        macos) log_info "  brew install $pkg" ;;
-    esac
-}
-
-# ============================================================================
-# Installation
-# ============================================================================
-
-clone_repo() {
-    log_info "Installing to $INSTALL_DIR..."
-
-    if [ -d "$INSTALL_DIR" ]; then
-        if [ -d "$INSTALL_DIR/.git" ]; then
-            log_info "Existing installation found, updating..."
-            cd "$INSTALL_DIR"
-
-            local autostash_ref=""
-            if [ -n "$(git status --porcelain)" ]; then
-                local stash_name
-                stash_name="gauss-install-autostash-$(date -u +%Y%m%d-%H%M%S)"
-                log_info "Local changes detected, stashing before update..."
-                git stash push --include-untracked -m "$stash_name"
-                autostash_ref="$(git rev-parse --verify refs/stash)"
-            fi
-
-            git fetch origin
-            git checkout "$BRANCH"
-            git pull origin "$BRANCH"
-
-            if [ -n "$autostash_ref" ]; then
-                local restore_now="yes"
-                if [ -t 0 ] && [ -t 1 ]; then
-                    echo
-                    log_warn "Local changes were stashed before updating."
-                    log_warn "Restoring them may reapply local customizations onto the updated codebase."
-                    printf "Restore local changes now? [Y/n] "
-                    read -r restore_answer
-                    case "$restore_answer" in
-                        ""|y|Y|yes|YES|Yes) restore_now="yes" ;;
-                        *) restore_now="no" ;;
-                    esac
-                fi
-
-                if [ "$restore_now" = "yes" ]; then
-                    log_info "Restoring local changes..."
-                    if git stash apply "$autostash_ref"; then
-                        git stash drop "$autostash_ref" >/dev/null
-                        log_warn "Local changes were restored on top of the updated codebase."
-                        log_warn "Review git diff / git status if Gauss behaves unexpectedly."
-                    else
-                        log_error "Update succeeded, but restoring local changes failed. Your changes are still preserved in git stash."
-                        log_info "Resolve manually with: git stash apply $autostash_ref"
-                        exit 1
-                    fi
-                else
-                    log_info "Skipped restoring local changes."
-                    log_info "Your changes are still preserved in git stash."
-                    log_info "Restore manually with: git stash apply $autostash_ref"
-                fi
-            fi
-        else
-            log_error "Directory exists but is not a git repository: $INSTALL_DIR"
-            log_info "Remove it or choose a different directory with --dir"
-            exit 1
-        fi
-    else
-        # Try SSH first (for private repo access), fall back to HTTPS
-        # GIT_SSH_COMMAND disables interactive prompts and sets a short timeout
-        # so SSH fails fast instead of hanging when no key is configured.
-        log_info "Trying SSH clone..."
-        if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
-           git clone --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
-            log_success "Cloned via SSH"
-        else
-            rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial SSH clone
-            log_info "SSH failed, trying HTTPS..."
-            if git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
-                log_success "Cloned via HTTPS"
-            else
-                log_error "Failed to clone repository"
-                exit 1
-            fi
-        fi
-    fi
-
-    cd "$INSTALL_DIR"
-
-    # mini-swe-agent (terminal tool backend) is optional in lite installs.
-    if [ "$INSTALL_SUBMODULES" = true ]; then
-        log_info "Initializing mini-swe-agent submodule (terminal backend)..."
-        git submodule update --init mini-swe-agent
-        log_success "Submodule ready"
-    else
-        log_info "Skipping mini-swe-agent submodule (lite profile)"
-    fi
-
-    log_success "Repository ready"
-}
-
-setup_venv() {
-    if [ "$USE_VENV" = false ]; then
-        log_info "Skipping virtual environment (--no-venv)"
-        return 0
-    fi
-
-    log_info "Creating virtual environment with Python $PYTHON_VERSION..."
-
-    if [ -d "venv" ]; then
-        log_info "Virtual environment already exists, recreating..."
-        rm -rf venv
-    fi
-
-    # uv creates the venv and pins the Python version in one step
-    $UV_CMD venv venv --python "$PYTHON_VERSION"
-
-    log_success "Virtual environment ready (Python $PYTHON_VERSION)"
-}
-
-install_deps() {
-    log_info "Installing dependencies..."
-
-    if [ "$USE_VENV" = true ]; then
-        # Tell uv to install into our venv (no need to activate)
-        export VIRTUAL_ENV="$INSTALL_DIR/venv"
-    fi
-
-    # On Debian/Ubuntu (including WSL), some Python packages need build tools.
-    # Check and offer to install them if missing.
-    if [ "$DISTRO" = "ubuntu" ] || [ "$DISTRO" = "debian" ]; then
-        local need_build_tools=false
-        for pkg in gcc python3-dev libffi-dev; do
-            if ! dpkg -s "$pkg" &>/dev/null; then
-                need_build_tools=true
-                break
-            fi
-        done
-        if [ "$need_build_tools" = true ]; then
-            log_info "Some build tools may be needed for Python packages..."
-            if command -v sudo &> /dev/null; then
-                if sudo -n true 2>/dev/null; then
-                    sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq build-essential python3-dev libffi-dev >/dev/null 2>&1 || true
-                    log_success "Build tools installed"
-                else
-                    read -p "Install build tools (build-essential, python3-dev)? (requires sudo) [Y/n] " -n 1 -r < /dev/tty
-                    echo
-                    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-                        sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq build-essential python3-dev libffi-dev >/dev/null 2>&1 || true
-                        log_success "Build tools installed"
-                    fi
-                fi
-            fi
-        fi
-    fi
-
-    # Install the main package in editable mode with the selected profile.
-    if ! $UV_CMD pip install -e ".[${EXTRAS}]" 2>/dev/null; then
-        log_warn "Profile install (.[${EXTRAS}]) failed, trying base install..."
-        if ! $UV_CMD pip install -e "."; then
-            log_error "Package installation failed."
-            log_info "Check that build tools are installed: sudo apt install build-essential python3-dev"
-            log_info "Then re-run: cd $INSTALL_DIR && uv pip install -e '.[${EXTRAS}]'"
-            exit 1
-        fi
-    fi
-
-    log_success "Main package installed"
-
-    # Install submodules when the selected profile requested them.
-    if [ "$INSTALL_SUBMODULES" = true ]; then
-        log_info "Installing mini-swe-agent (terminal tool backend)..."
-        if [ -d "mini-swe-agent" ] && [ -f "mini-swe-agent/pyproject.toml" ]; then
-            $UV_CMD pip install -e "./mini-swe-agent" || log_warn "mini-swe-agent install failed (terminal tools may not work)"
-            log_success "mini-swe-agent installed"
-        else
-            log_warn "mini-swe-agent not found (run: git submodule update --init)"
-        fi
-    else
-        log_info "Skipping mini-swe-agent install (lite profile)"
-    fi
-
-    # tinker-atropos (RL training) is optional — skip by default.
-    # To enable RL tools: git submodule update --init tinker-atropos && uv pip install -e "./tinker-atropos"
-    if [ -d "tinker-atropos" ] && [ -f "tinker-atropos/pyproject.toml" ]; then
-        log_info "tinker-atropos submodule found — skipping install (optional, for RL training)"
-        log_info "  To install: $UV_CMD pip install -e \"./tinker-atropos\""
-    fi
-
-    log_success "All dependencies installed"
-}
-
-setup_path() {
-    log_info "Setting up gauss command..."
-
-    if [ "$USE_VENV" = true ]; then
-        GAUSS_BIN="$INSTALL_DIR/venv/bin/gauss"
-        GAUSS_BIN="$INSTALL_DIR/venv/bin/gauss"
-    else
-        GAUSS_BIN="$(which gauss 2>/dev/null || echo "")"
-        GAUSS_BIN="$(which gauss 2>/dev/null || echo "")"
-        if [ -z "$GAUSS_BIN" ] && [ -z "$GAUSS_BIN" ]; then
-            log_warn "gauss entry point not found on PATH after install"
-            return 0
-        fi
-    fi
-    [ -z "$GAUSS_BIN" ] && GAUSS_BIN="$GAUSS_BIN"
-
-    # Verify the entry point script was actually generated
-    if [ ! -x "$GAUSS_BIN" ]; then
-        log_warn "gauss entry point not found at $GAUSS_BIN"
-        log_info "This usually means the pip install didn't complete successfully."
-        log_info "Try: cd $INSTALL_DIR && uv pip install -e '.[${EXTRAS}]'"
-        return 0
-    fi
-
-    # Create symlink in ~/.local/bin (standard user binary location, usually on PATH)
-    mkdir -p "$HOME/.local/bin"
-    ln -sf "$GAUSS_BIN" "$HOME/.local/bin/gauss"
-    ln -sf "$GAUSS_BIN" "$HOME/.local/bin/gauss"
-    log_success "Symlinked gauss → ~/.local/bin/gauss"
-    log_success "Symlinked gauss → ~/.local/bin/gauss (compatibility alias)"
-
-    # Check if ~/.local/bin is on PATH; if not, add it to shell config.
-    # Detect the user's actual login shell (not the shell running this script,
-    # which is always bash when piped from curl).
-    if ! echo "$PATH" | tr ':' '\n' | grep -q "^$HOME/.local/bin$"; then
-        SHELL_CONFIGS=()
-        LOGIN_SHELL="$(basename "${SHELL:-/bin/bash}")"
-        case "$LOGIN_SHELL" in
-            zsh)
-                [ -f "$HOME/.zshrc" ] && SHELL_CONFIGS+=("$HOME/.zshrc")
-                ;;
-            bash)
-                [ -f "$HOME/.bashrc" ] && SHELL_CONFIGS+=("$HOME/.bashrc")
-                [ -f "$HOME/.bash_profile" ] && SHELL_CONFIGS+=("$HOME/.bash_profile")
-                ;;
-            *)
-                [ -f "$HOME/.bashrc" ] && SHELL_CONFIGS+=("$HOME/.bashrc")
-                [ -f "$HOME/.zshrc" ] && SHELL_CONFIGS+=("$HOME/.zshrc")
-                ;;
-        esac
-        # Also ensure ~/.profile has it (sourced by login shells on
-        # Ubuntu/Debian/WSL even when ~/.bashrc is skipped)
-        [ -f "$HOME/.profile" ] && SHELL_CONFIGS+=("$HOME/.profile")
-
-        PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
-
-        for SHELL_CONFIG in "${SHELL_CONFIGS[@]}"; do
-            if ! grep -v '^[[:space:]]*#' "$SHELL_CONFIG" 2>/dev/null | grep -qE 'PATH=.*\.local/bin'; then
-                echo "" >> "$SHELL_CONFIG"
-                echo "# Gauss — ensure ~/.local/bin is on PATH" >> "$SHELL_CONFIG"
-                echo "$PATH_LINE" >> "$SHELL_CONFIG"
-                log_success "Added ~/.local/bin to PATH in $SHELL_CONFIG"
-            fi
-        done
-
-        if [ ${#SHELL_CONFIGS[@]} -eq 0 ]; then
-            log_warn "Could not detect shell config file to add ~/.local/bin to PATH"
-            log_info "Add manually: $PATH_LINE"
-        fi
-    else
-        log_info "~/.local/bin already on PATH"
-    fi
-
-    # Export for current session so gauss works immediately
     export PATH="$HOME/.local/bin:$PATH"
 
-    log_success "gauss command ready (legacy alias: gauss)"
+    if ! command -v claude >/dev/null 2>&1; then
+        log_error "Claude Code install did not provide a claude executable."
+        exit 1
+    fi
+    if ! command -v codex >/dev/null 2>&1; then
+        log_error "OpenAI Codex install did not provide a codex executable."
+        exit 1
+    fi
+
+    log_success "Claude Code ready: $(claude --version 2>/dev/null || printf 'installed')"
+    log_success "OpenAI Codex ready: $(codex --version 2>/dev/null || printf 'installed')"
 }
 
-copy_config_templates() {
-    log_info "Setting up configuration files..."
+ensure_lean_toolchain() {
+    log_info "Ensuring elan + Lean stable are available..."
 
-    # Create ~/.gauss directory structure (config at top level, code in subdir)
-    mkdir -p "$GAUSS_HOME"/{cron,sessions,logs,pairing,hooks,image_cache,audio_cache,memories,skills,whatsapp/session}
+    if ! command -v elan >/dev/null 2>&1 && [ ! -x "$HOME/.elan/bin/elan" ]; then
+        local elan_script
+        elan_script="$(mktemp /tmp/elan-init.XXXXXX.sh)"
+        curl -L https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$elan_script"
+        bash "$elan_script" -y
+    fi
 
-    # Create .env at ~/.gauss/.env (top level, easy to find)
-    if [ ! -f "$GAUSS_HOME/.env" ]; then
-        if [ -f "$INSTALL_DIR/.env.example" ]; then
-            cp "$INSTALL_DIR/.env.example" "$GAUSS_HOME/.env"
-            log_success "Created ~/.gauss/.env from template"
+    export PATH="$HOME/.elan/bin:$PATH"
+
+    if ! command -v elan >/dev/null 2>&1; then
+        log_error "elan is not available after installation."
+        exit 1
+    fi
+
+    elan toolchain install stable >/dev/null 2>&1 || true
+    elan default stable >/dev/null 2>&1
+
+    if ! command -v lake >/dev/null 2>&1; then
+        log_error "lake is not available after configuring Lean."
+        exit 1
+    fi
+
+    log_success "Lean ready: $(elan --version | head -n 1)"
+    log_success "Lake ready: $(lake --version | head -n 1)"
+}
+
+sync_repo_submodules() {
+    log_info "Syncing the mini-swe-agent submodule..."
+    git -C "$REPO_ROOT" submodule sync --recursive
+    git -C "$REPO_ROOT" submodule update --init mini-swe-agent
+
+    if [ ! -f "$REPO_ROOT/mini-swe-agent/pyproject.toml" ]; then
+        log_error "mini-swe-agent is not available after submodule sync."
+        exit 1
+    fi
+
+    log_success "Submodule ready"
+}
+
+ensure_python_runtime() {
+    log_info "Ensuring Python $PYTHON_VERSION and the repository virtualenv are ready..."
+
+    "$UV_CMD" python install "$PYTHON_VERSION"
+
+    if [ -d "$VENV_DIR" ] && [ "$RECREATE_VENV" = true ]; then
+        log_warn "Recreating the repository virtualenv ($VENV_DIR)..."
+        rm -rf "$VENV_DIR"
+    fi
+
+    if [ -d "$VENV_DIR" ] && [ -x "$VENV_PYTHON" ]; then
+        local current_python
+        current_python="$("$VENV_PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+        if [ "$current_python" != "$PYTHON_VERSION" ]; then
+            log_error "Existing virtualenv uses Python $current_python, expected $PYTHON_VERSION."
+            log_info "Rerun with --recreate-venv to replace the repository virtualenv."
+            exit 1
+        fi
+    else
+        "$UV_CMD" venv "$VENV_DIR" --python "$PYTHON_VERSION"
+    fi
+
+    export VIRTUAL_ENV="$VENV_DIR"
+    export PATH="$VENV_BIN:$HOME/.local/bin:$HOME/.elan/bin:$PATH"
+    FILE_PYTHON="$VENV_PYTHON"
+    log_success "Virtualenv ready: $VENV_DIR"
+}
+
+install_repo_dependencies() {
+    log_info "Installing Python and Node dependencies from the checked-out repository..."
+    "$UV_CMD" pip install -e ".[full]"
+    "$UV_CMD" pip install -e "./mini-swe-agent"
+    npm ci --silent
+    log_success "Repository dependencies installed"
+}
+
+link_repo_binaries() {
+    log_info "Linking repository-local executables into ~/.local/bin..."
+    ln -sf "$VENV_BIN/gauss" "$HOME/.local/bin/gauss"
+    if [ -x "$VENV_BIN/gauss-agent" ]; then
+        ln -sf "$VENV_BIN/gauss-agent" "$HOME/.local/bin/gauss-agent"
+    fi
+    GAUSS_BIN="$HOME/.local/bin/gauss"
+    export PATH="$HOME/.local/bin:$VENV_BIN:$HOME/.elan/bin:$PATH"
+    log_success "gauss command is available at $GAUSS_BIN"
+}
+
+prepare_gauss_home() {
+    log_info "Preparing $GAUSS_HOME..."
+    mkdir -p \
+        "$GAUSS_HOME" \
+        "$GAUSS_HOME/cron" \
+        "$GAUSS_HOME/sessions" \
+        "$GAUSS_HOME/logs" \
+        "$GAUSS_HOME/memories" \
+        "$GAUSS_HOME/skills" \
+        "$GAUSS_HOME/skins" \
+        "$GAUSS_HOME/whatsapp/session" \
+        "$GUIDE_DIR"
+    chmod 700 "$GAUSS_HOME" || true
+
+    touch "$GAUSS_HOME/.env"
+    chmod 600 "$GAUSS_HOME/.env" || true
+
+    printf '%s\n' "$REPO_ROOT" > "$INSTALL_ROOT_FILE"
+    chmod 600 "$INSTALL_ROOT_FILE" || true
+
+    log_success "Gauss home ready"
+}
+
+write_env_value() {
+    local key="$1"
+    local value="${2-}"
+    "$FILE_PYTHON" - "$GAUSS_HOME/.env" "$key" "$value" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+existing = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+kept = [line for line in existing if not line.startswith(f"{key}=")]
+if value:
+    kept.append(f"{key}={json.dumps(value)}")
+env_path.write_text(("\n".join(kept).rstrip() + "\n") if kept else "", encoding="utf-8")
+env_path.chmod(0o600)
+PY
+}
+
+sync_optional_provider_keys() {
+    log_info "Synchronizing staged provider keys into $GAUSS_HOME/.env..."
+
+    local provider_keys=(
+        OPENROUTER_API_KEY
+        OPENAI_API_KEY
+        ANTHROPIC_API_KEY
+    )
+
+    local key
+    for key in "${provider_keys[@]}"; do
+        if [ "${!key+x}" = "x" ] && [ -n "${!key}" ]; then
+            write_env_value "$key" "${!key}"
+            log_success "Staged $key"
+        elif [ "${!key+x}" = "x" ]; then
+            write_env_value "$key" ""
+            log_info "Cleared staged $key (explicit empty value exported in the current shell)"
         else
-            touch "$GAUSS_HOME/.env"
-            log_success "Created ~/.gauss/.env"
-        fi
-    else
-        log_info "~/.gauss/.env already exists, keeping it"
-    fi
-
-    # Create config.yaml at ~/.gauss/config.yaml (top level, easy to find)
-    if [ ! -f "$GAUSS_HOME/config.yaml" ]; then
-        if [ -f "$INSTALL_DIR/cli-config.yaml.example" ]; then
-            cp "$INSTALL_DIR/cli-config.yaml.example" "$GAUSS_HOME/config.yaml"
-            log_success "Created ~/.gauss/config.yaml from template"
-        fi
-    else
-        log_info "~/.gauss/config.yaml already exists, keeping it"
-    fi
-
-    # Create SOUL.md if it doesn't exist (global persona file)
-    if [ ! -f "$GAUSS_HOME/SOUL.md" ]; then
-        cat > "$GAUSS_HOME/SOUL.md" << 'SOUL_EOF'
-# Gauss Persona
-
-<!--
-This file defines the agent's personality and tone.
-The agent will embody whatever you write here.
-Edit this to customize how Gauss communicates with you.
-
-Examples:
-  - "You are a warm, playful assistant who uses kaomoji occasionally."
-  - "You are a concise technical expert. No fluff, just facts."
-  - "You speak like a friendly coworker who happens to know everything."
-
-This file is loaded fresh each message -- no restart needed.
-Delete the contents (or this file) to use the default personality.
--->
-SOUL_EOF
-        log_success "Created ~/.gauss/SOUL.md (edit to customize personality)"
-    fi
-
-    log_success "Configuration directory ready: ~/.gauss/"
-    log_info "Bundled skills are not installed by default in Gauss."
-}
-
-install_node_deps() {
-    if [ "$HAS_NODE" = false ]; then
-        log_info "Skipping Node.js dependencies (Node not installed)"
-        return 0
-    fi
-
-    if [ -f "$INSTALL_DIR/package.json" ]; then
-        log_info "Installing Node.js dependencies (browser tools)..."
-        cd "$INSTALL_DIR"
-        npm install --silent 2>/dev/null || {
-            log_warn "npm install failed (browser tools may not work)"
-        }
-        log_success "Node.js dependencies installed"
-
-        # Install Playwright browser + system dependencies.
-        # Playwright's install-deps only supports apt/dnf/zypper natively.
-        # For Arch/Manjaro we install the system libs via pacman first.
-        log_info "Installing browser engine (Playwright Chromium)..."
-        case "$DISTRO" in
-            arch|manjaro)
-                if command -v pacman &> /dev/null; then
-                    log_info "Arch/Manjaro detected — installing Chromium system dependencies via pacman..."
-                    if command -v sudo &> /dev/null && sudo -n true 2>/dev/null; then
-                        sudo NEEDRESTART_MODE=a pacman -S --noconfirm --needed \
-                            nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
-                    elif [ "$(id -u)" -eq 0 ]; then
-                        pacman -S --noconfirm --needed \
-                            nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib >/dev/null 2>&1 || true
-                    else
-                        log_warn "Cannot install browser deps without sudo. Run manually:"
-                        log_warn "  sudo pacman -S nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib"
-                    fi
-                fi
-                cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null || true
-                ;;
-            *)
-                cd "$INSTALL_DIR" && npx playwright install --with-deps chromium 2>/dev/null || true
-                ;;
-        esac
-        log_success "Browser engine installed"
-    fi
-
-    # Install WhatsApp bridge dependencies
-    if [ -f "$INSTALL_DIR/scripts/whatsapp-bridge/package.json" ]; then
-        log_info "Installing WhatsApp bridge dependencies..."
-        cd "$INSTALL_DIR/scripts/whatsapp-bridge"
-        npm install --silent 2>/dev/null || {
-            log_warn "WhatsApp bridge npm install failed (WhatsApp may not work)"
-        }
-        log_success "WhatsApp bridge dependencies installed"
-    fi
-}
-
-run_setup_wizard() {
-    if [ "$RUN_SETUP" = false ]; then
-        log_info "Skipping setup wizard (--skip-setup)"
-        return 0
-    fi
-
-    # The setup wizard reads from /dev/tty, so it works even when the
-    # install script itself is piped (curl | bash). Only skip if no
-    # terminal is available at all (e.g. Docker build, CI).
-    if ! [ -e /dev/tty ]; then
-        log_info "Setup wizard skipped (no terminal available). Run 'gauss setup' after install."
-        return 0
-    fi
-
-    echo ""
-    log_info "Starting setup wizard..."
-    echo ""
-
-    cd "$INSTALL_DIR"
-
-    # Run gauss setup using the venv Python directly (no activation needed).
-    # Redirect stdin from /dev/tty so interactive prompts work when piped from curl.
-    if [ "$USE_VENV" = true ]; then
-        "$INSTALL_DIR/venv/bin/python" -m gauss_cli.main setup < /dev/tty
-    else
-        python -m gauss_cli.main setup < /dev/tty
-    fi
-}
-
-maybe_start_gateway() {
-    # Check if any messaging platform tokens were configured
-    ENV_FILE="$GAUSS_HOME/.env"
-    if [ ! -f "$ENV_FILE" ]; then
-        return 0
-    fi
-
-    HAS_MESSAGING=false
-    for VAR in TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN WHATSAPP_ENABLED; do
-        VAL=$(grep "^${VAR}=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2-)
-        if [ -n "$VAL" ] && [ "$VAL" != "your-token-here" ]; then
-            HAS_MESSAGING=true
-            break
+            log_info "Keeping existing $key (no value exported in the current shell)"
         fi
     done
+}
 
-    if [ "$HAS_MESSAGING" = false ]; then
-        return 0
+ensure_workspace() {
+    log_info "Preparing the prewarmed Lean workspace at $WORKSPACE_DIR..."
+
+    if [ ! -f "$WORKSPACE_DIR/lakefile.toml" ] && [ ! -f "$WORKSPACE_DIR/lakefile.lean" ]; then
+        if [ -e "$WORKSPACE_DIR" ]; then
+            log_error "$WORKSPACE_DIR already exists but is not a Lean workspace."
+            log_info "Choose a different --workspace-dir or move the existing directory aside."
+            exit 1
+        fi
+        mkdir -p "$(dirname "$WORKSPACE_DIR")"
+        (
+            cd "$(dirname "$WORKSPACE_DIR")"
+            lake new "$(basename "$WORKSPACE_DIR")" math
+        )
     fi
 
-    echo ""
-    log_info "Messaging platform token detected!"
-    log_info "The gateway needs to be running for Gauss to send/receive messages."
+    (
+        cd "$WORKSPACE_DIR"
+        lake exe cache get
+        lake build
+    )
 
-    # If WhatsApp is enabled and no session exists yet, run foreground first for QR scan
-    WHATSAPP_VAL=$(grep "^WHATSAPP_ENABLED=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2-)
-    WHATSAPP_SESSION="$GAUSS_HOME/whatsapp/session/creds.json"
-    if [ "$WHATSAPP_VAL" = "true" ] && [ ! -f "$WHATSAPP_SESSION" ]; then
-        if [ "$IS_INTERACTIVE" = true ]; then
-            echo ""
-            log_info "WhatsApp is enabled but not yet paired."
-            log_info "Running 'gauss whatsapp' to pair via QR code..."
-            echo ""
-            read -p "Pair WhatsApp now? [Y/n] " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-                GAUSS_CMD="$HOME/.local/bin/gauss"
-                [ ! -x "$GAUSS_CMD" ] && GAUSS_CMD="gauss"
-                $GAUSS_CMD whatsapp || true
-            fi
-        else
-            log_info "WhatsApp pairing skipped (non-interactive). Run 'gauss whatsapp' to pair."
-        fi
-    fi
+    if [ ! -f "$WORKSPACE_DIR/PAPER.md" ]; then
+        cat > "$WORKSPACE_DIR/PAPER.md" <<'TXT'
+# Gauss Workspace
 
-    if ! [ -e /dev/tty ]; then
-        log_info "Gateway setup skipped (no terminal available). Run 'gauss gateway install' later."
-        return 0
-    fi
+This Lean workspace is prewarmed and already registered as the active Gauss project.
 
-    echo ""
-    read -p "Would you like to install the gateway as a background service? [Y/n] " -n 1 -r < /dev/tty
-    echo
-
-    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-        GAUSS_CMD="$HOME/.local/bin/gauss"
-        if [ ! -x "$GAUSS_CMD" ]; then
-            GAUSS_CMD="gauss"
-        fi
-
-        if command -v systemctl &> /dev/null; then
-            log_info "Installing systemd service..."
-            if $GAUSS_CMD gateway install 2>/dev/null; then
-                log_success "Gateway service installed"
-                if $GAUSS_CMD gateway start 2>/dev/null; then
-                    log_success "Gateway started! Your bot is now online."
-                else
-                    log_warn "Service installed but failed to start. Try: gauss gateway start"
-                fi
-            else
-                log_warn "Systemd install failed. You can start manually: gauss gateway"
-            fi
-        else
-            log_info "systemd not available — starting gateway in background..."
-            nohup $GAUSS_CMD gateway > "$GAUSS_HOME/logs/gateway.log" 2>&1 &
-            GATEWAY_PID=$!
-            log_success "Gateway started (PID $GATEWAY_PID). Logs: ~/.gauss/logs/gateway.log"
-            log_info "To stop: kill $GATEWAY_PID"
-            log_info "To restart later: gauss gateway"
-        fi
+Quickstart:
+1. Run `gauss-open-session` for the batteries-included launcher.
+2. Or launch `gauss` directly inside this workspace.
+3. Use `/prove`, `/draft`, `/autoprove`, `/formalize`, `/autoformalize`, or `/swarm`.
+4. Keep paper notes, extracted statements, and scratch proofs in this project.
+TXT
+        log_success "Created $WORKSPACE_DIR/PAPER.md"
     else
-        log_info "Skipped. Start the gateway later with: gauss gateway"
+        log_info "Keeping existing $WORKSPACE_DIR/PAPER.md"
     fi
 }
 
-print_success() {
-    echo ""
+initialize_gauss_workspace() {
+    log_info "Initializing the Gauss project manifest and runtime defaults..."
+
+    cp "$REPO_ROOT/docs/skins/mathinc.yaml" "$GAUSS_HOME/skins/mathinc.yaml"
+
+    "$FILE_PYTHON" - "$WORKSPACE_DIR" <<'PY'
+import sys
+from gauss_cli.project import initialize_gauss_project
+
+initialize_gauss_project(sys.argv[1], name="Gauss Workspace")
+PY
+
+    "$GAUSS_BIN" config set display.skin mathinc
+    "$GAUSS_BIN" config set terminal.backend local
+    "$GAUSS_BIN" config set terminal.cwd "$WORKSPACE_DIR"
+    "$GAUSS_BIN" config set gauss.autoformalize.backend claude-code
+    "$GAUSS_BIN" config set gauss.autoformalize.auth_mode auto
+    "$GAUSS_BIN" config set agent.max_turns 90
+
+    log_success "Gauss workspace defaults applied"
+}
+
+ensure_shell_runtime_block() {
+    log_info "Writing an idempotent shell runtime block..."
+
+    "$FILE_PYTHON" - "$GAUSS_HOME" "$REPO_ROOT" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+gauss_home = sys.argv[1]
+repo_root = sys.argv[2]
+shell_configs = [Path(arg).expanduser() for arg in sys.argv[3:]]
+
+block = f"""# >>> gauss workflow installer env >>>
+export GAUSS_HOME="{gauss_home}"
+export GAUSS_INSTALL_ROOT="{repo_root}"
+if [ -f "{gauss_home}/.env" ]; then
+  set -a
+  . "{gauss_home}/.env"
+  set +a
+fi
+export PATH="$HOME/.local/bin:{repo_root}/venv/bin:$HOME/.elan/bin:$PATH"
+export PROMPT_TOOLKIT_NO_CPR=1
+# <<< gauss workflow installer env <<<
+"""
+
+pattern = re.compile(
+    r"(?ms)^# >>> gauss workflow installer env >>>\n.*?^# <<< gauss workflow installer env <<<\n?"
+)
+
+for config_path in shell_configs:
+    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    if pattern.search(existing):
+        updated = pattern.sub(block, existing)
+    else:
+        updated = existing.rstrip("\n")
+        if updated:
+            updated += "\n\n"
+        updated += block
+    config_path.write_text(updated, encoding="utf-8")
+PY
+
+    export GAUSS_HOME
+    export GAUSS_INSTALL_ROOT="$REPO_ROOT"
+    export PATH="$HOME/.local/bin:$VENV_BIN:$HOME/.elan/bin:$PATH"
+    export PROMPT_TOOLKIT_NO_CPR=1
+
+    log_success "Shell runtime block written"
+}
+
+write_helper_assets() {
+    log_info "Writing workflow-derived helper scripts and the local guide..."
+
+    "$FILE_PYTHON" - "$HOME/.local/bin" "$GAUSS_HOME" "$REPO_ROOT" "$WORKSPACE_DIR" "$GUIDE_DIR" <<'PY_HELPERS'
+from html import escape
+from pathlib import Path
+import subprocess
+import textwrap
+import sys
+
+helper_dir = Path(sys.argv[1]).expanduser()
+gauss_home = Path(sys.argv[2]).expanduser()
+repo_root = Path(sys.argv[3]).expanduser()
+workspace_dir = Path(sys.argv[4]).expanduser()
+guide_dir = Path(sys.argv[5]).expanduser()
+
+helper_dir.mkdir(parents=True, exist_ok=True)
+guide_dir.mkdir(parents=True, exist_ok=True)
+
+readme = (repo_root / "README.md").read_text(encoding="utf-8")
+repo_head = subprocess.check_output(
+    ["git", "-C", str(repo_root), "rev-parse", "--short=12", "HEAD"],
+    text=True,
+).strip()
+
+guide_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Open Gauss Local Guide</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #faf4ec;
+      --panel: #f0e5d9;
+      --surface: #fcf8f3;
+      --ink: #241d18;
+      --muted: #655a4f;
+      --accent: #485d42;
+      --border: #d8cbbf;
+      --code-bg: #e8ddd1;
+    }}
+    * {{ box-sizing: border-box; }}
+    html, body {{
+      margin: 0;
+      min-height: 100%;
+      background: linear-gradient(180deg, #fffaf5 0%, var(--bg) 100%);
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+    }}
+    body {{ display: grid; grid-template-rows: auto auto auto 1fr; }}
+    header {{
+      padding: 16px 20px 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }}
+    header strong {{ font-size: 16px; letter-spacing: 0.03em; }}
+    header a {{ color: var(--accent); text-decoration: none; font-weight: 700; }}
+    .hero, .grid {{
+      margin: 0 20px 14px;
+      padding: 16px 18px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--panel);
+    }}
+    .hero p, .grid p {{ margin: 0; line-height: 1.6; }}
+    .grid {{
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }}
+    .card {{
+      padding: 14px;
+      border: 1px solid rgba(72, 93, 66, 0.12);
+      border-radius: 14px;
+      background: rgba(252, 248, 243, 0.9);
+    }}
+    .card strong {{
+      display: block;
+      margin-bottom: 8px;
+    }}
+    .card code {{
+      background: var(--code-bg);
+      color: var(--ink);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
+    main {{
+      margin: 0 20px 20px;
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--surface);
+      overflow: auto;
+    }}
+    pre {{
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 13px/1.45 "IBM Plex Mono", "SFMono-Regular", monospace;
+      color: var(--ink);
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Open Gauss Batteries-Included Guide</strong>
+    <a href="https://github.com/math-inc/opengauss" target="_blank" rel="noreferrer">Open repo</a>
+  </header>
+  <section class="hero">
+    <p>This local installer uses the checked-out <code>math-inc/opengauss</code> repository at <code>{escape(str(repo_root))}</code> and currently resolves to <code>{repo_head}</code>. It preloads Lean 4, Claude Code, OpenAI Codex, the Math Inc skin, and a ready project at <code>{escape(str(workspace_dir))}</code>. Run <code>gauss-open-session</code> for the batteries-included launcher or <code>gauss</code> directly if you prefer to skip the session wrapper.</p>
+  </section>
+  <section class="grid">
+    <div class="card">
+      <strong>Ready Paths</strong>
+      <p><code>{escape(str(repo_root))}</code><br><code>{escape(str(workspace_dir))}</code><br><code>{escape(str(gauss_home / ".env"))}</code></p>
+    </div>
+    <div class="card">
+      <strong>Backend Helpers</strong>
+      <p><code>gauss-use-claude-backend</code><br><code>gauss-use-codex-backend</code><br><code>gauss-use-auto-auth</code><br><code>gauss-use-claude-login</code><br><code>gauss-use-codex-login</code></p>
+    </div>
+    <div class="card">
+      <strong>Main Provider Helpers</strong>
+      <p><code>gauss-use-openrouter-key</code><br><code>gauss-use-anthropic-key</code><br><code>gauss-use-openai-key</code><br><code>gauss-configure-main-provider</code><br><code>gauss-open-session</code></p>
+    </div>
+    <div class="card">
+      <strong>Optional Staged Keys</strong>
+      <p><code>OPENROUTER_API_KEY</code><br><code>OPENAI_API_KEY</code><br><code>ANTHROPIC_API_KEY</code></p>
+    </div>
+  </section>
+  <main><pre>{escape(readme)}</pre></main>
+</body>
+</html>
+"""
+(guide_dir / "index.html").write_text(guide_html, encoding="utf-8")
+
+template_replacements = {
+    "__GAUSS_HOME__": str(gauss_home),
+    "__REPO_ROOT__": str(repo_root),
+    "__WORKSPACE_DIR__": str(workspace_dir),
+    "__GUIDE_PATH__": str(guide_dir / "index.html"),
+}
+
+scripts = {
+    "gauss-configure-main-provider": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+WORKSPACE_DIR="${GAUSS_WORKSPACE_DIR:-__WORKSPACE_DIR__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+if [ -f "$GAUSS_HOME/.env" ]; then
+  set -a
+  . "$GAUSS_HOME/.env"
+  set +a
+fi
+provider="${1:-auto}"
+
+write_env_value() {
+  "$REPO_ROOT/venv/bin/python" - "$GAUSS_HOME/.env" "$1" "$2" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+existing = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+kept = [line for line in existing if not line.startswith(f"{key}=")]
+if value:
+    kept.append(f"{key}={json.dumps(value)}")
+env_path.write_text(("\\n".join(kept).rstrip() + "\\n") if kept else "", encoding="utf-8")
+env_path.chmod(0o600)
+PY
+}
+
+write_provider_config() {
+  "$REPO_ROOT/venv/bin/python" - "$GAUSS_HOME/config.yaml" "$1" "$2" "$3" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config_path = Path(sys.argv[1])
+provider, model_name, base_url = sys.argv[2:5]
+config = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+if not isinstance(config, dict):
+    config = {}
+model = config.get("model", {})
+if isinstance(model, str):
+    model = {"default": model}
+if not isinstance(model, dict):
+    model = {}
+model["provider"] = provider
+model["default"] = model_name
+if base_url:
+    model["base_url"] = base_url.rstrip("/")
+else:
+    model.pop("base_url", None)
+config["model"] = model
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+PY
+}
+
+deactivate_oauth_provider() {
+  "$REPO_ROOT/venv/bin/python" - <<'PY'
+try:
+    from gauss_cli.auth import deactivate_provider
+    deactivate_provider()
+except Exception:
+    pass
+PY
+}
+
+set_openrouter() {
+  if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    printf '%s\\n' 'No OPENROUTER_API_KEY found in ~/.gauss/.env.' >&2
+    return 1
+  fi
+  unset OPENAI_BASE_URL || true
+  write_env_value OPENAI_BASE_URL ""
+  write_provider_config openrouter anthropic/claude-opus-4.6 ""
+  deactivate_oauth_provider
+  printf '%s\\n' 'OpenRouter main provider configured (anthropic/claude-opus-4.6).'
+}
+
+set_anthropic() {
+  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_TOKEN:-}" ]; then
+    printf '%s\\n' 'No ANTHROPIC_API_KEY or ANTHROPIC_TOKEN found in ~/.gauss/.env.' >&2
+    return 1
+  fi
+  unset OPENAI_BASE_URL || true
+  write_env_value OPENAI_BASE_URL ""
+  write_provider_config anthropic claude-opus-4-6 ""
+  deactivate_oauth_provider
+  printf '%s\\n' 'Anthropic main provider configured (claude-opus-4-6).'
+}
+
+set_openai() {
+  if [ -z "${OPENAI_API_KEY:-}" ]; then
+    printf '%s\\n' 'No OPENAI_API_KEY found in ~/.gauss/.env.' >&2
+    return 1
+  fi
+  export OPENAI_BASE_URL="https://api.openai.com/v1"
+  write_env_value OPENAI_BASE_URL "$OPENAI_BASE_URL"
+  write_provider_config custom gpt-5.4 "$OPENAI_BASE_URL"
+  deactivate_oauth_provider
+  printf '%s\\n' 'OpenAI-compatible main provider configured (https://api.openai.com/v1, gpt-5.4).'
+}
+
+case "$provider" in
+  auto)
+    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+      set_openrouter
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_TOKEN:-}" ]; then
+      set_anthropic
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+      set_openai
+    else
+      printf '%s\\n' 'No staged OpenRouter, Anthropic, or OpenAI key found for the main interactive provider.' >&2
+      exit 1
+    fi
+    ;;
+  openrouter)
+    set_openrouter
+    ;;
+  anthropic)
+    set_anthropic
+    ;;
+  openai|custom)
+    set_openai
+    ;;
+  *)
+    printf '%s\\n' 'Usage: gauss-configure-main-provider [auto|openrouter|anthropic|openai]' >&2
+    exit 2
+    ;;
+esac
+""",
+    "gauss-use-claude-backend": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+gauss config set gauss.autoformalize.backend claude-code
+printf '%s\\n' 'Gauss managed backend set to claude-code.'
+""",
+    "gauss-use-codex-backend": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+gauss config set gauss.autoformalize.backend codex
+printf '%s\\n' 'Gauss managed backend set to codex.'
+""",
+    "gauss-use-auto-auth": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+gauss config set gauss.autoformalize.auth_mode auto
+printf '%s\\n' 'Gauss auth mode set to auto.'
+""",
+    "gauss-use-claude-login": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+gauss config set gauss.autoformalize.backend claude-code
+gauss config set gauss.autoformalize.auth_mode login
+exec claude auth login
+""",
+    "gauss-use-codex-login": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+gauss config set gauss.autoformalize.backend codex
+gauss config set gauss.autoformalize.auth_mode login
+exec codex login
+""",
+    "gauss-use-anthropic-key": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+if ! [ -f "$GAUSS_HOME/.env" ] || ! grep -Eq '^ANTHROPIC_API_KEY=|^ANTHROPIC_TOKEN=' "$GAUSS_HOME/.env"; then
+  printf '%s\\n' 'No ANTHROPIC_API_KEY or ANTHROPIC_TOKEN found in ~/.gauss/.env.' >&2
+  exit 1
+fi
+gauss config set gauss.autoformalize.backend claude-code
+gauss config set gauss.autoformalize.auth_mode api-key
+provider_status="$(gauss-configure-main-provider anthropic)"
+printf '%s\\n' 'Gauss managed backend set to claude-code with api-key auth.'
+printf '%s\\n' "$provider_status"
+""",
+    "gauss-use-openrouter-key": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+if ! [ -f "$GAUSS_HOME/.env" ] || ! grep -q '^OPENROUTER_API_KEY=' "$GAUSS_HOME/.env"; then
+  printf '%s\\n' 'No OPENROUTER_API_KEY found in ~/.gauss/.env.' >&2
+  exit 1
+fi
+gauss-use-auto-auth >/dev/null
+provider_status="$(gauss-configure-main-provider openrouter)"
+printf '%s\\n' 'Gauss main interactive provider now uses OpenRouter. Managed backend auth stays on auto.'
+printf '%s\\n' "$provider_status"
+""",
+    "gauss-use-openai-key": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+if ! [ -f "$GAUSS_HOME/.env" ] || ! grep -q '^OPENAI_API_KEY=' "$GAUSS_HOME/.env"; then
+  printf '%s\\n' 'No OPENAI_API_KEY found in ~/.gauss/.env.' >&2
+  exit 1
+fi
+gauss config set gauss.autoformalize.backend codex
+gauss config set gauss.autoformalize.auth_mode api-key
+provider_status="$(gauss-configure-main-provider openai)"
+printf '%s\\n' 'Gauss managed backend set to codex with api-key auth.'
+printf '%s\\n' "$provider_status"
+""",
+    "gauss-launch-session": """#!/usr/bin/env bash
+set -euo pipefail
+GAUSS_HOME="${GAUSS_HOME:-__GAUSS_HOME__}"
+REPO_ROOT="${GAUSS_REPO_ROOT:-__REPO_ROOT__}"
+WORKSPACE_DIR="${GAUSS_WORKSPACE_DIR:-__WORKSPACE_DIR__}"
+export GAUSS_HOME
+export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
+export PROMPT_TOOLKIT_NO_CPR=1
+
+if [ -f "$GAUSS_HOME/.env" ]; then
+  set -a
+  . "$GAUSS_HOME/.env"
+  set +a
+fi
+
+print_summary=0
+if [ "${1:-}" = "--print-summary" ]; then
+  print_summary=1
+  shift
+fi
+
+staged_keys="none"
+if [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  staged_keys=""
+  [ -n "${OPENROUTER_API_KEY:-}" ] && staged_keys="${staged_keys} OPENROUTER_API_KEY"
+  [ -n "${OPENAI_API_KEY:-}" ] && staged_keys="${staged_keys} OPENAI_API_KEY"
+  [ -n "${ANTHROPIC_API_KEY:-}" ] && staged_keys="${staged_keys} ANTHROPIC_API_KEY"
+  staged_keys="${staged_keys# }"
+fi
+
+interactive_provider="none staged"
+launch_gauss=0
+if provider_status="$(gauss-configure-main-provider auto 2>&1)"; then
+  interactive_provider="$provider_status"
+  launch_gauss=1
+else
+  interactive_provider="$provider_status"
+fi
+
+clear >/dev/null 2>&1 || true
+cat <<TXT
+Open Gauss workflow installer is ready.
+
+Repo: $REPO_ROOT
+Branch: $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'detached')
+Commit: $(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')
+Lean project: $WORKSPACE_DIR
+Guide: __GUIDE_PATH__
+Gauss project manifest: initialized
+Default managed backend: claude-code
+Default auth mode: auto
+Main interactive provider: ${interactive_provider}
+Staged keys: ${staged_keys}
+
+Quickstart:
+  /prove
+  /draft "Theorem 3.2"
+  /autoprove
+  /formalize --source ./paper.pdf "Theorem 3.2"
+  /autoformalize --source ./paper.pdf --claim-select=first --out=Paper.lean
+  /swarm
+
+Backend helpers:
+  gauss-use-claude-backend
+  gauss-use-codex-backend
+  gauss-use-auto-auth
+  gauss-use-claude-login
+  gauss-use-codex-login
+  gauss-use-openrouter-key
+  gauss-use-anthropic-key
+  gauss-use-openai-key
+
+Interactive provider notes:
+  Auto-selection priority: OpenRouter, then Anthropic, then OpenAI-compatible.
+  OpenRouter affects the main chat UI only; managed workflow backends stay separate.
+  PROMPT_TOOLKIT_NO_CPR=1 is enabled to avoid CPR warnings inside tmux.
+
+The local guide is written to __GUIDE_PATH__.
+TXT
+
+if [ "$print_summary" -eq 1 ]; then
+  exit 0
+fi
+
+cd "$WORKSPACE_DIR"
+if [ "$launch_gauss" -eq 1 ]; then
+  gauss "$@" || true
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec bash -i
+  fi
+else
+  cat <<TXT
+
+Gauss was not auto-launched because no interactive provider could be configured.
+
+To make the main chat UI ready, export one of:
+  OPENROUTER_API_KEY
+  ANTHROPIC_API_KEY
+  OPENAI_API_KEY
+
+Then rerun one of:
+  gauss-configure-main-provider auto
+  gauss-use-openrouter-key
+  gauss-use-anthropic-key
+  gauss-use-openai-key
+
+You can still run backend-only setup via:
+  gauss-use-claude-backend
+  gauss-use-codex-backend
+TXT
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec bash -i
+  fi
+  exit 1
+fi
+""",
+    "gauss-open-session": """#!/usr/bin/env bash
+set -euo pipefail
+launcher="$HOME/.local/bin/gauss-launch-session"
+if [ "${1:-}" = "--print-summary" ]; then
+  exec "$launcher" --print-summary
+fi
+if [ "$#" -eq 0 ] && command -v tmux >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ] && [ -z "${TMUX:-}" ] && [ "${GAUSS_NO_TMUX:-0}" != "1" ]; then
+  exec tmux new-session -A -s gauss "$launcher"
+fi
+exec "$launcher" "$@"
+""",
+    "gauss-open-guide": """#!/usr/bin/env bash
+set -euo pipefail
+guide_path="__GUIDE_PATH__"
+if [ ! -f "$guide_path" ]; then
+  printf '%s\\n' "Guide not found: $guide_path" >&2
+  exit 1
+fi
+if command -v xdg-open >/dev/null 2>&1; then
+  exec xdg-open "$guide_path"
+elif command -v open >/dev/null 2>&1; then
+  exec open "$guide_path"
+fi
+printf '%s\\n' "$guide_path"
+""",
+}
+
+for name, template in scripts.items():
+    content = textwrap.dedent(template).lstrip("\n")
+    for old, new in template_replacements.items():
+        content = content.replace(old, new)
+    path = helper_dir / name
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+PY_HELPERS
+
+    log_success "Helper scripts and guide are ready"
+}
+
+auto_configure_main_provider() {
+    log_info "Applying workflow-style main provider auto-selection..."
+    if provider_status="$("$HOME/.local/bin/gauss-configure-main-provider" auto 2>&1)"; then
+        log_success "$provider_status"
+    else
+        log_warn "$provider_status"
+        log_info "No interactive provider was auto-configured. Use the staged-key helpers later if needed."
+    fi
+}
+
+print_summary() {
+    echo
     echo -e "${GREEN}${BOLD}"
     echo "┌─────────────────────────────────────────────────────────┐"
-    echo "│              ✓ Installation Complete!                   │"
+    echo "│             ✓ Open Gauss Is Ready                       │"
     echo "└─────────────────────────────────────────────────────────┘"
     echo -e "${NC}"
-    echo ""
-
-    # Show file locations
-    echo -e "${CYAN}${BOLD}📁 Your files (all in ~/.gauss/ by default):${NC}"
-    echo ""
-    echo -e "   ${YELLOW}Config:${NC}    ~/.gauss/config.yaml"
-    echo -e "   ${YELLOW}API Keys:${NC}  ~/.gauss/.env"
-    echo -e "   ${YELLOW}Data:${NC}      ~/.gauss/cron/, sessions/, logs/"
-    echo -e "   ${YELLOW}Code:${NC}      ~/.gauss/opengauss-dev/"
-    echo ""
-
-    echo -e "${CYAN}─────────────────────────────────────────────────────────${NC}"
-    echo ""
-    echo -e "${CYAN}${BOLD}🚀 Commands:${NC}"
-    echo ""
-    echo -e "   ${GREEN}gauss${NC}               Open the project-scoped workflow manager"
-    echo -e "   ${GREEN}gauss setup${NC}         Configure provider/model access for direct chat"
-    echo -e "   ${GREEN}gauss update${NC}        Update to latest version"
-    echo -e "   ${GREEN}/project init${NC}       Register the current Lean repo as a Gauss project"
-    echo -e "   ${GREEN}/prove${NC}              Spawn a managed guided proving agent"
-    echo -e "   ${GREEN}/autoprove${NC}          Spawn a managed autonomous proving agent"
-    echo -e "   ${GREEN}/formalize${NC}          Spawn a managed formalization agent"
-    echo ""
-
-    echo -e "${CYAN}─────────────────────────────────────────────────────────${NC}"
-    echo ""
-    echo -e "${YELLOW}⚡ Reload your shell to use the 'gauss' command:${NC}"
-    echo ""
-    echo "   source ~/.bashrc   # or ~/.zshrc"
-    echo ""
-
-    # Show Node.js warning if auto-install failed
-    if [ "$HAS_NODE" = false ]; then
-        echo -e "${YELLOW}"
-        echo "Note: Node.js could not be installed automatically."
-        echo "Browser tools need Node.js. Install manually:"
-        echo "  https://nodejs.org/en/download/"
-        echo -e "${NC}"
-    fi
-
-    # Show ripgrep note if not installed
-    if [ "$HAS_RIPGREP" = false ]; then
-        echo -e "${YELLOW}"
-        echo "Note: ripgrep (rg) was not found. File search will use"
-        echo "grep as a fallback. For faster search in large codebases,"
-        echo "install ripgrep: sudo apt install ripgrep (or brew install ripgrep)"
-        echo -e "${NC}"
-    fi
+    echo
+    echo -e "${CYAN}${BOLD}Ready Paths:${NC}"
+    echo "  Repo:       $REPO_ROOT"
+    echo "  Venv:       $VENV_DIR"
+    echo "  Gauss home: $GAUSS_HOME"
+    echo "  Workspace:  $WORKSPACE_DIR"
+    echo "  Guide:      $GUIDE_DIR/index.html"
+    echo
+    echo -e "${CYAN}${BOLD}Next Commands:${NC}"
+    echo "  gauss-open-session"
+    echo "  gauss-open-guide"
+    echo "  gauss"
+    echo
+    echo -e "${CYAN}${BOLD}Helper Commands:${NC}"
+    echo "  gauss-configure-main-provider [auto|openrouter|anthropic|openai]"
+    echo "  gauss-use-openrouter-key"
+    echo "  gauss-use-anthropic-key"
+    echo "  gauss-use-openai-key"
+    echo "  gauss-use-claude-backend"
+    echo "  gauss-use-codex-backend"
+    echo "  gauss-use-auto-auth"
+    echo
+    echo -e "${CYAN}${BOLD}Notes:${NC}"
+    echo "  - The installer keeps code in your existing repository checkout."
+    echo "  - The local guide is written to $GUIDE_DIR/index.html."
+    echo "  - No Morph iframe is exposed automatically; use gauss-open-guide if you want the local guide in a browser."
+    echo "  - No tmux session is opened during install; use gauss-open-session when you want the workflow launcher."
 }
-
-# ============================================================================
-# Main
-# ============================================================================
 
 main() {
+    parse_args "$@"
     print_banner
-
     detect_os
-    install_uv
-    check_python
-    check_git
+    require_repo_checkout
+    export GAUSS_HOME
+    export GAUSS_INSTALL_ROOT="$REPO_ROOT"
+    ensure_local_bin_path
     install_system_packages
-    check_claude_code
-
-    clone_repo
-    setup_venv
-    install_deps
-    if [ "$INSTALL_NODE_DEPS" = true ]; then
-        check_node
-        install_node_deps
-    else
-        log_info "Skipping repo Node.js dependencies (lite profile)"
-    fi
-    setup_path
-    copy_config_templates
-    run_setup_wizard
-    maybe_start_gateway
-
-    print_success
+    ensure_uv
+    ensure_nodejs
+    ensure_global_cli_tools
+    ensure_lean_toolchain
+    sync_repo_submodules
+    ensure_python_runtime
+    install_repo_dependencies
+    link_repo_binaries
+    prepare_gauss_home
+    sync_optional_provider_keys
+    ensure_workspace
+    initialize_gauss_workspace
+    ensure_shell_runtime_block
+    write_helper_assets
+    auto_configure_main_provider
+    print_summary
 }
 
-main
+main "$@"

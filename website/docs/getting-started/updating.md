@@ -12,7 +12,7 @@ description: "Update or uninstall Gauss."
 gauss update
 ```
 
-If you installed from the hosted shell bootstrap, `gauss update` pulls from the same Math Inc repository and refreshes the local `~/.gauss/opengauss-dev` checkout.
+If you installed from a checked-out repository with `./scripts/install.sh`, `gauss update` pulls updates inside that same `math-inc/opengauss` checkout and refreshes the repository-local virtualenv and `mini-swe-agent` dependency.
 
 ## Uninstall
 

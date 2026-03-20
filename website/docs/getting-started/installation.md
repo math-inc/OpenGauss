@@ -1,7 +1,7 @@
 ---
 sidebar_position: 2
 title: "Installation"
-description: "Install Gauss on Linux, macOS, or WSL2."
+description: "Install Gauss from a Linux repository checkout."
 ---
 
 # Installation
@@ -9,15 +9,17 @@ description: "Install Gauss on Linux, macOS, or WSL2."
 ## Recommended
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/math-inc/opengauss-dev/main/scripts/install.sh | bash
+# From the root of a checked-out math-inc/opengauss repository
+./scripts/install.sh
 ```
 
-This installs Gauss into `~/.gauss/` by default, exposes `gauss` as the primary command, and installs the default managed-workflow runtime.
+This repository-local installer targets Linux checkouts, with Ubuntu, Debian, and WSL as the primary supported environments. It keeps code in your existing checkout, writes runtime state to `~/.gauss/`, exposes `gauss` via `~/.local/bin/gauss`, and prewarms `~/GaussWorkspace`.
 
 ## Compatibility Behavior
 
-- `gauss` is still installed as a compatibility alias
-- if you already have `~/.gauss/` and no `~/.gauss/`, Gauss continues using the legacy directory
+- `gauss` is the primary command
+- `gauss update` expects the active CLI to come from a checked-out `math-inc/opengauss` git repository
+- if you already have `~/.gauss/`, the installer reuses it
 
 ## After Install
 

@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -461,7 +462,7 @@ def cmd_chat(args):
 
     # Import and run the CLI
     from cli import main as cli_main
-    
+
     # Build kwargs from args
     kwargs = {
         "model": args.model,
@@ -1886,20 +1887,20 @@ def _update_via_zip(args):
     from urllib.request import urlretrieve
     
     branch = "main"
-    zip_url = f"https://github.com/math-inc/opengauss-dev/archive/refs/heads/{branch}.zip"
+    zip_url = f"https://github.com/math-inc/opengauss/archive/refs/heads/{branch}.zip"
     
     print("→ Downloading latest version...")
     try:
         tmp_dir = tempfile.mkdtemp(prefix="gauss-update-")
-        zip_path = os.path.join(tmp_dir, f"opengauss-dev-{branch}.zip")
+        zip_path = os.path.join(tmp_dir, f"opengauss-{branch}.zip")
         urlretrieve(zip_url, zip_path)
         
         print("→ Extracting...")
         with zipfile.ZipFile(zip_path, 'r') as zf:
             zf.extractall(tmp_dir)
         
-        # GitHub ZIPs extract to opengauss-dev-<branch>/
-        extracted = os.path.join(tmp_dir, f"opengauss-dev-{branch}")
+        # GitHub ZIPs extract to opengauss-<branch>/
+        extracted = os.path.join(tmp_dir, f"opengauss-{branch}")
         if not os.path.isdir(extracted):
             # Try to find it
             for d in os.listdir(tmp_dir):
@@ -1928,28 +1929,74 @@ def _update_via_zip(args):
         
         # Cleanup
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        
+
     except Exception as e:
         print(f"✗ ZIP update failed: {e}")
         sys.exit(1)
-    
-    # Reinstall Python dependencies
-    print("→ Updating Python dependencies...")
-    import subprocess
-    uv_bin = shutil.which("uv")
-    if uv_bin:
-        subprocess.run(
-            [uv_bin, "pip", "install", "-e", ".", "--quiet"],
-            cwd=PROJECT_ROOT, check=True,
-            env={**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-        )
-    else:
-        venv_pip = PROJECT_ROOT / "venv" / ("Scripts" if sys.platform == "win32" else "bin") / "pip"
-        if venv_pip.exists():
-            subprocess.run([str(venv_pip), "install", "-e", ".", "--quiet"], cwd=PROJECT_ROOT, check=True)
-    
+
+    _refresh_workflow_runtime(PROJECT_ROOT)
+
     print()
     print("✓ Update complete!")
+
+
+def _print_repo_local_reinstall_guidance() -> None:
+    print("✗ Not a git repository. Reinstall from a checked-out math-inc/opengauss repository:")
+    print("  git clone https://github.com/math-inc/opengauss.git")
+    print("  cd opengauss")
+    print("  ./scripts/install.sh")
+
+
+def _refresh_workflow_runtime(repo_root: Path) -> None:
+    """Refresh editable installs and repo-side runtime assets after an update."""
+    print("→ Updating Python dependencies...")
+    uv_bin = shutil.which("uv")
+    venv_dir = repo_root / "venv"
+    install_env = dict(os.environ)
+    if venv_dir.exists():
+        install_env["VIRTUAL_ENV"] = str(venv_dir)
+
+    if uv_bin:
+        subprocess.run(
+            [uv_bin, "pip", "install", "-e", ".[full]", "--quiet"],
+            cwd=repo_root,
+            check=True,
+            env=install_env,
+        )
+        if (repo_root / "mini-swe-agent" / "pyproject.toml").exists():
+            subprocess.run(
+                [uv_bin, "pip", "install", "-e", "./mini-swe-agent", "--quiet"],
+                cwd=repo_root,
+                check=True,
+                env=install_env,
+            )
+    else:
+        venv_pip = venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / "pip"
+        pip_cmd = [str(venv_pip)] if venv_pip.exists() else ["pip"]
+        subprocess.run(
+            pip_cmd + ["install", "-e", ".[full]", "--quiet"],
+            cwd=repo_root,
+            check=True,
+            env=install_env,
+        )
+        if (repo_root / "mini-swe-agent" / "pyproject.toml").exists():
+            subprocess.run(
+                pip_cmd + ["install", "-e", "./mini-swe-agent", "--quiet"],
+                cwd=repo_root,
+                check=True,
+                env=install_env,
+            )
+
+    git_cmd = ["git"]
+    if sys.platform == "win32":
+        git_cmd = ["git", "-c", "windows.appendAtomically=false"]
+    if (repo_root / ".git").exists():
+        subprocess.run(git_cmd + ["submodule", "sync", "--recursive"], cwd=repo_root, check=False)
+        subprocess.run(git_cmd + ["submodule", "update", "--init", "mini-swe-agent"], cwd=repo_root, check=False)
+
+    if (repo_root / "package-lock.json").exists() and shutil.which("npm"):
+        print("→ Updating Node.js dependencies...")
+        subprocess.run(["npm", "ci", "--silent"], cwd=repo_root, check=False)
 
 
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
@@ -2074,8 +2121,6 @@ def _restore_stashed_changes(
 
 def cmd_update(args):
     """Update Gauss to the latest version."""
-    import shutil
-    
     print("⚕ Updating Gauss...")
     print()
     
@@ -2088,8 +2133,7 @@ def cmd_update(args):
         if sys.platform == "win32":
             use_zip_update = True
         else:
-            print("✗ Not a git repository. Please reinstall:")
-            print("  curl -fsSL https://raw.githubusercontent.com/math-inc/opengauss-dev/main/scripts/install.sh | bash")
+            _print_repo_local_reinstall_guidance()
             sys.exit(1)
     
     # On Windows, git can fail with "unable to write loose object file: Invalid argument"
@@ -2163,28 +2207,7 @@ def cmd_update(args):
                     prompt_user=prompt_for_restore,
                 )
         
-        # Reinstall Python dependencies (prefer uv for speed, fall back to pip)
-        print("→ Updating Python dependencies...")
-        uv_bin = shutil.which("uv")
-        if uv_bin:
-            subprocess.run(
-                [uv_bin, "pip", "install", "-e", ".", "--quiet"],
-                cwd=PROJECT_ROOT, check=True,
-                env={**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-            )
-        else:
-            venv_pip = PROJECT_ROOT / "venv" / ("Scripts" if sys.platform == "win32" else "bin") / "pip"
-            if venv_pip.exists():
-                subprocess.run([str(venv_pip), "install", "-e", ".", "--quiet"], cwd=PROJECT_ROOT, check=True)
-            else:
-                subprocess.run(["pip", "install", "-e", ".", "--quiet"], cwd=PROJECT_ROOT, check=True)
-        
-        # Check for Node.js deps
-        if (PROJECT_ROOT / "package.json").exists():
-            import shutil
-            if shutil.which("npm"):
-                print("→ Updating Node.js dependencies...")
-                subprocess.run(["npm", "install", "--silent"], cwd=PROJECT_ROOT, check=False)
+        _refresh_workflow_runtime(PROJECT_ROOT)
         
         print()
         print("✓ Code updated!")
