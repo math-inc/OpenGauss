@@ -94,6 +94,19 @@ GAUSS_VERSION_OUTPUT="$(gauss --version)"
 printf '%s\n' "$GAUSS_VERSION_OUTPUT"
 [[ "$GAUSS_VERSION_OUTPUT" == *"Gauss v"* ]] || die "unexpected gauss --version output"
 
+echo "==> Verifying rerun idempotence and staged-key preservation"
+printf '\nSMOKE_RERUN_MARKER\n' >> "$WORKSPACE_DIR/PAPER.md"
+touch "$WORKSPACE_DIR/KEEP_ME.txt"
+unset OPENAI_API_KEY OPENROUTER_API_KEY ANTHROPIC_API_KEY
+./scripts/install.sh \
+    --gauss-home "$GAUSS_HOME" \
+    --workspace-dir "$WORKSPACE_DIR" \
+    --skip-system-packages
+grep -F 'SMOKE_RERUN_MARKER' "$WORKSPACE_DIR/PAPER.md" >/dev/null || die "expected PAPER.md marker to survive rerun"
+assert_exists "$WORKSPACE_DIR/KEEP_ME.txt"
+grep -F 'OPENAI_API_KEY="dummy-installer-key"' "$GAUSS_HOME/.env" >/dev/null || die "expected staged OPENAI_API_KEY to be preserved on rerun"
+grep -F 'OPENAI_BASE_URL="https://api.openai.com/v1"' "$GAUSS_HOME/.env" >/dev/null || die "expected OPENAI_BASE_URL to be preserved on rerun"
+
 echo "==> Verifying launcher summary"
 SUMMARY_OUTPUT="$(gauss-launch-session --print-summary)"
 printf '%s\n' "$SUMMARY_OUTPUT"

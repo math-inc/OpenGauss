@@ -72,6 +72,11 @@ Optional staged provider keys:
   OPENROUTER_API_KEY
   OPENAI_API_KEY
   ANTHROPIC_API_KEY
+
+Behavior:
+  Exported non-empty provider keys are written to ~/.gauss/.env.
+  Unset provider keys leave existing ~/.gauss/.env values untouched.
+  Export a provider key as an empty string to clear the staged value.
 TXT
 }
 
@@ -515,12 +520,14 @@ sync_optional_provider_keys() {
 
     local key
     for key in "${provider_keys[@]}"; do
-        if [ -n "${!key:-}" ]; then
+        if [ "${!key+x}" = "x" ] && [ -n "${!key}" ]; then
             write_env_value "$key" "${!key}"
             log_success "Staged $key"
-        else
+        elif [ "${!key+x}" = "x" ]; then
             write_env_value "$key" ""
-            log_info "Cleared staged $key (no value exported in the current shell)"
+            log_info "Cleared staged $key (explicit empty value exported in the current shell)"
+        else
+            log_info "Keeping existing $key (no value exported in the current shell)"
         fi
     done
 }
