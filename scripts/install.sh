@@ -7,8 +7,10 @@
 #
 # Supported contract:
 # - Run from the root of a checked-out math-inc/opengauss repository.
-# - Linux only. Ubuntu/Debian/WSL are the primary supported environments.
-# - Automatic system package installation is only supported on Debian/Ubuntu.
+# - Linux and macOS. Ubuntu/Debian/WSL are the primary Linux environments.
+#   macOS requires Homebrew (https://brew.sh).
+# - Automatic system package installation uses apt-get on Debian/Ubuntu
+#   and Homebrew on macOS.
 #
 # Usage:
 #   ./scripts/install.sh
@@ -60,7 +62,7 @@ Options:
   --gauss-home PATH       Override the Gauss home directory (default: ~/.gauss)
   --workspace-dir PATH    Override the prewarmed Lean workspace path
                           (default: ~/GaussWorkspace)
-  --skip-system-packages  Do not run apt-get even on Debian/Ubuntu
+  --skip-system-packages  Do not run apt-get (Debian/Ubuntu) or brew (macOS)
   --recreate-venv         Remove and recreate the repository virtualenv
   -h, --help              Show this help
 
@@ -174,9 +176,8 @@ detect_os() {
             fi
             ;;
         Darwin*)
-            log_error "This workflow-derived installer is Linux-only."
-            log_info "Use a Linux checkout (Ubuntu/Debian/WSL recommended) and rerun ./scripts/install.sh."
-            exit 1
+            OS="darwin"
+            DISTRO="macos"
             ;;
         *)
             log_error "Unsupported operating system: $(uname -s)"
@@ -191,7 +192,11 @@ detect_os() {
             ;;
     esac
 
-    log_success "Detected Linux environment ($DISTRO)"
+    if [ "$OS" = "darwin" ]; then
+        log_success "Detected macOS environment ($(sw_vers -productVersion 2>/dev/null || echo unknown))"
+    else
+        log_success "Detected Linux environment ($DISTRO)"
+    fi
 }
 
 require_repo_checkout() {
@@ -246,6 +251,9 @@ ensure_required_commands() {
     log_error "Missing required commands: ${missing[*]}"
     if [ "$DEBIAN_LIKE" = true ]; then
         log_info "Run without --skip-system-packages or install them manually with apt-get."
+    elif [ "$OS" = "darwin" ]; then
+        log_info "Run without --skip-system-packages or install the missing tools via Homebrew."
+        log_info "Ensure Xcode Command Line Tools are installed: xcode-select --install"
     else
         log_info "Install the missing tools manually and rerun the installer."
         log_info "Ubuntu/Debian/WSL are the primary supported environments for this workflow-derived install path."
@@ -255,8 +263,57 @@ ensure_required_commands() {
 
 install_system_packages() {
     if [ "$SKIP_SYSTEM_PACKAGES" = true ]; then
-        log_info "Skipping apt-get bootstrap (--skip-system-packages)"
+        if [ "$OS" = "darwin" ]; then
+            log_info "Skipping Homebrew bootstrap (--skip-system-packages)"
+        else
+            log_info "Skipping apt-get bootstrap (--skip-system-packages)"
+        fi
         ensure_required_commands
+        return
+    fi
+
+    if [ "$OS" = "darwin" ]; then
+        # Probe well-known Homebrew locations if not already on PATH.
+        if ! command -v brew >/dev/null 2>&1; then
+            if [ -x /opt/homebrew/bin/brew ]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            elif [ -x /usr/local/bin/brew ]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+            else
+                log_error "Homebrew is required on macOS but was not found."
+                log_info "Install it from https://brew.sh and rerun ./scripts/install.sh"
+                exit 1
+            fi
+        fi
+
+        # Xcode Command Line Tools provide gcc, make, and system headers.
+        if ! xcode-select -p >/dev/null 2>&1; then
+            log_error "Xcode Command Line Tools are required on macOS."
+            log_info "Install them with: xcode-select --install"
+            exit 1
+        fi
+
+        local packages=(
+            curl
+            ffmpeg
+            git
+            jq
+            pkg-config
+            "python@${PYTHON_VERSION}"
+            ripgrep
+            tmux
+            unzip
+            xz
+            zip
+        )
+
+        log_info "Installing macOS workflow prerequisites via Homebrew..."
+        # brew may return non-zero for post-install warnings on already-installed
+        # packages; ensure_required_commands below is the real validation gate.
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install "${packages[@]}" \
+            || log_warn "brew install exited with errors; checking what is available..."
+        ensure_required_commands
+        log_success "System packages are ready"
         return
     fi
 
@@ -340,6 +397,25 @@ ensure_nodejs() {
         fi
     fi
 
+    if [ "$OS" = "darwin" ]; then
+        log_info "Installing Node.js ${NODE_MAJOR}.x via Homebrew..."
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install "node@${NODE_MAJOR}"
+        if ! brew link --overwrite "node@${NODE_MAJOR}" 2>/dev/null; then
+            log_warn "Could not link node@${NODE_MAJOR} (another Node.js version may be linked)."
+            log_info "Using keg-only path instead."
+        fi
+        # Resolve the keg prefix in a separate step to avoid the bash 3.2
+        # portability issue where export VAR="$(cmd)" swallows failures.
+        local node_prefix
+        node_prefix="$(brew --prefix "node@${NODE_MAJOR}")" || {
+            log_error "Could not determine Homebrew prefix for node@${NODE_MAJOR}."
+            exit 1
+        }
+        export PATH="${node_prefix}/bin:$PATH"
+        log_success "Node.js ready: $(node -v)"
+        return
+    fi
+
     if [ "$DEBIAN_LIKE" != true ]; then
         log_error "Node.js ${NODE_MAJOR}.x is required."
         log_info "Install Node.js ${NODE_MAJOR}.x and npm manually, then rerun ./scripts/install.sh."
@@ -353,27 +429,45 @@ ensure_nodejs() {
 }
 
 ensure_global_cli_tools() {
-    log_info "Installing Claude Code and OpenAI Codex into ~/.local..."
+    log_info "Checking for Claude Code and OpenAI Codex..."
     mkdir -p "$HOME/.local/bin"
-
-    npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@latest >/dev/null 2>&1 \
-        || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code >/dev/null 2>&1
-    npm install -g --prefix "$HOME/.local" @openai/codex@latest >/dev/null 2>&1 \
-        || npm install -g --prefix "$HOME/.local" @openai/codex >/dev/null 2>&1
-
     export PATH="$HOME/.local/bin:$PATH"
 
-    if ! command -v claude >/dev/null 2>&1; then
-        log_error "Claude Code install did not provide a claude executable."
-        exit 1
-    fi
-    if ! command -v codex >/dev/null 2>&1; then
-        log_error "OpenAI Codex install did not provide a codex executable."
-        exit 1
+    # Claude Code — skip if already available (e.g. pixi wrapper, manual install)
+    if command -v claude >/dev/null 2>&1; then
+        log_success "Claude Code already available: $(claude --version 2>/dev/null || printf 'installed')"
+    else
+        log_info "Installing Claude Code via npm..."
+        if npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@latest 2>&1 \
+                || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code 2>&1; then
+            if command -v claude >/dev/null 2>&1; then
+                log_success "Claude Code ready: $(claude --version 2>/dev/null || printf 'installed')"
+            else
+                log_error "Claude Code install did not provide a claude executable."
+                exit 1
+            fi
+        else
+            log_error "Failed to install Claude Code via npm."
+            exit 1
+        fi
     fi
 
-    log_success "Claude Code ready: $(claude --version 2>/dev/null || printf 'installed')"
-    log_success "OpenAI Codex ready: $(codex --version 2>/dev/null || printf 'installed')"
+    # OpenAI Codex — optional, only needed for the codex backend
+    if command -v codex >/dev/null 2>&1; then
+        log_success "OpenAI Codex already available: $(codex --version 2>/dev/null || printf 'installed')"
+    else
+        log_info "Installing OpenAI Codex via npm (optional, for codex backend)..."
+        if npm install -g --prefix "$HOME/.local" @openai/codex@latest 2>&1 \
+                || npm install -g --prefix "$HOME/.local" @openai/codex 2>&1; then
+            if command -v codex >/dev/null 2>&1; then
+                log_success "OpenAI Codex ready: $(codex --version 2>/dev/null || printf 'installed')"
+            else
+                log_warn "OpenAI Codex install did not provide a codex executable (codex backend will not work)."
+            fi
+        else
+            log_warn "Failed to install OpenAI Codex via npm (codex backend will not work)."
+        fi
+    fi
 }
 
 ensure_lean_toolchain() {
