@@ -4,9 +4,8 @@ Interactive setup wizard for Gauss Agent.
 Modular wizard with independently-runnable sections:
   1. Model & Provider — choose your AI provider and model
   2. Terminal Backend — where your agent runs commands
-  3. Messaging Platforms — connect Telegram, Discord, etc.
-  4. Tools — configure TTS, web search, image generation, etc.
-  5. Agent Settings — iterations, compression, session reset
+  3. Tools — configure TTS, web search, image generation, etc.
+  4. Agent Settings — iterations, compression, session reset
 
 Config files are stored in ~/.gauss/ for easy access.
 """
@@ -571,7 +570,6 @@ def _print_setup_summary(config: dict, gauss_home):
     print(f"   {color('gauss setup', Colors.GREEN)}          Re-run the full wizard")
     print(f"   {color('gauss setup model', Colors.GREEN)}    Change model/provider")
     print(f"   {color('gauss setup terminal', Colors.GREEN)} Change terminal backend")
-    print(f"   {color('gauss setup gateway', Colors.GREEN)}  Configure messaging")
     print(f"   {color('gauss setup tools', Colors.GREEN)}    Configure tool providers")
     print()
     print(f"   {color('gauss config', Colors.GREEN)}         View current settings")
@@ -591,7 +589,6 @@ def _print_setup_summary(config: dict, gauss_home):
     print(color("🚀 Ready to go!", Colors.CYAN, Colors.BOLD))
     print()
     print(f"   {color('gauss', Colors.GREEN)}              Start chatting")
-    print(f"   {color('gauss gateway', Colors.GREEN)}      Start messaging gateway")
     print(f"   {color('gauss doctor', Colors.GREEN)}       Check for issues")
     print()
 
@@ -1530,18 +1527,6 @@ def setup_terminal_backend(config: dict):
         print_success("Terminal backend: Local")
         print_info("Commands run directly on this machine.")
 
-        # CWD for messaging
-        print()
-        print_info("Working directory for messaging sessions:")
-        print_info("  When using Gauss via Telegram/Discord, this is where")
-        print_info(
-            "  the agent starts. CLI mode always starts in the current directory."
-        )
-        current_cwd = config.get("terminal", {}).get("cwd", "")
-        cwd = prompt("  Messaging working directory", current_cwd or str(Path.home()))
-        if cwd:
-            config["terminal"]["cwd"] = cwd
-
         # Sudo support
         print()
         existing_sudo = get_env_value("SUDO_PASSWORD")
@@ -1809,7 +1794,7 @@ def setup_agent_settings(config: dict):
     # ── Tool Progress Display ──
     print_info("")
     print_info("Tool Progress Display")
-    print_info("Controls how much tool activity is shown (CLI and messaging).")
+    print_info("Controls how much tool activity is shown.")
     print_info("  off     — Silent, just the final response")
     print_info("  new     — Show tool name only when it changes (less noise)")
     print_info("  all     — Show every tool call with a short preview")
@@ -1851,7 +1836,7 @@ def setup_agent_settings(config: dict):
     # ── Session Reset Policy ──
     print_header("Session Reset Policy")
     print_info(
-        "Messaging sessions (Telegram, Discord, etc.) accumulate context over time."
+        "Sessions accumulate context over time."
     )
     print_info(
         "Each message adds to the conversation history, which means growing API costs."
@@ -1946,11 +1931,11 @@ def setup_agent_settings(config: dict):
 
 
 # =============================================================================
-# Section 4: Messaging Platforms (Gateway)
+# Section 3: Tool Configuration (delegates to unified tools_config.py)
 # =============================================================================
 
 
-def setup_gateway(config: dict):
+def _legacy_setup_gateway(config: dict):
     """Configure messaging platform integrations."""
     print_header("Messaging Platforms")
     print_info("Connect to messaging platforms to chat with Gauss from anywhere.")
@@ -2313,11 +2298,6 @@ def setup_gateway(config: dict):
         print_info("━" * 50)
 
 
-# =============================================================================
-# Section 5: Tool Configuration (delegates to unified tools_config.py)
-# =============================================================================
-
-
 def setup_tools(config: dict, first_install: bool = False):
     """Configure tools — delegates to the unified tools_command() in tools_config.py.
 
@@ -2448,7 +2428,6 @@ def _offer_openclaw_migration(gauss_home: Path) -> bool:
 SETUP_SECTIONS = [
     ("model", "Model & Provider", setup_model_provider),
     ("terminal", "Terminal Backend", setup_terminal_backend),
-    ("gateway", "Messaging Platforms (Gateway)", setup_gateway),
     ("tools", "Tools", setup_tools),
     ("agent", "Agent Settings", setup_agent_settings),
 ]
@@ -2461,7 +2440,6 @@ def run_setup_wizard(args):
       gauss setup           — full or quick (auto-detected)
       gauss setup model     — just model/provider
       gauss setup terminal  — just terminal backend
-      gauss setup gateway   — just messaging platforms
       gauss setup tools     — just tool configuration
       gauss setup agent     — just agent settings
     """
@@ -2568,33 +2546,26 @@ def run_setup_wizard(args):
             "---",
             "Model & Provider",
             "Terminal Backend",
-            "Messaging Platforms (Gateway)",
             "Tools",
             "Agent Settings",
             "---",
             "Exit",
         ]
 
-        # Separator indices (not selectable, but prompt_choice doesn't filter them,
-        # so we handle them below)
         choice = prompt_choice("What would you like to do?", menu_choices, 0)
 
         if choice == 0:
-            # Quick setup
             _run_quick_setup(config, gauss_home)
             return
         elif choice == 1:
-            # Full setup — fall through to run all sections
             pass
-        elif choice in (2, 8):
-            # Separator — treat as exit
+        elif choice in (2, 7):
             print_info(f"Exiting. Run '{get_cli_command_name()} setup' again when ready.")
             return
-        elif choice == 9:
+        elif choice == 8:
             print_info(f"Exiting. Run '{get_cli_command_name()} setup' again when ready.")
             return
-        elif 3 <= choice <= 7:
-            # Individual section
+        elif 3 <= choice <= 6:
             section_idx = choice - 3
             _, label, func = SETUP_SECTIONS[section_idx]
             func(config)
@@ -2607,9 +2578,8 @@ def run_setup_wizard(args):
         print_info("We'll walk you through:")
         print_info("  1. Model & Provider — choose your AI provider and model")
         print_info("  2. Terminal Backend — where your agent runs commands")
-        print_info("  3. Messaging Platforms — connect Telegram, Discord, etc.")
-        print_info("  4. Tools — configure TTS, web search, image generation, etc.")
-        print_info("  5. Agent Settings — iterations, compression, session reset")
+        print_info("  3. Tools — configure web search, image generation, etc.")
+        print_info("  4. Agent Settings — iterations, compression, session reset")
         print()
         print_info("Press Enter to begin, or Ctrl+C to exit.")
         try:
@@ -2638,14 +2608,11 @@ def run_setup_wizard(args):
     # Section 2: Terminal Backend
     setup_terminal_backend(config)
 
-    # Section 3: Agent Settings
-    setup_agent_settings(config)
-
-    # Section 4: Messaging Platforms
-    setup_gateway(config)
-
-    # Section 5: Tools
+    # Section 3: Tools
     setup_tools(config, first_install=not is_existing)
+
+    # Section 4: Agent Settings
+    setup_agent_settings(config)
 
     # Save and show summary
     save_config(config)
@@ -2714,13 +2681,7 @@ def _run_quick_setup(config: dict, gauss_home):
             else:
                 print_warning(f"  Skipped {var['name']}")
 
-    # Split missing optional vars by category
     missing_tools = [v for v in missing_optional if v.get("category") == "tool"]
-    missing_messaging = [
-        v
-        for v in missing_optional
-        if v.get("category") == "messaging" and not v.get("advanced")
-    ]
 
     # ── Tool API keys (checklist) ──
     if missing_tools:
@@ -2741,66 +2702,6 @@ def _run_quick_setup(config: dict, gauss_home):
         for idx in selected_indices:
             var = missing_tools[idx]
             _prompt_api_key(var)
-
-    # ── Messaging platforms (checklist then prompt for selected) ──
-    if missing_messaging:
-        print()
-        print_header("Messaging Platforms")
-        print_info("Connect Gauss to messaging apps to chat from anywhere.")
-        print_info("You can configure these later with 'gauss setup gateway'.")
-
-        # Group by platform (preserving order)
-        platform_order = []
-        platforms = {}
-        for var in missing_messaging:
-            name = var["name"]
-            if "TELEGRAM" in name:
-                plat = "Telegram"
-            elif "DISCORD" in name:
-                plat = "Discord"
-            elif "SLACK" in name:
-                plat = "Slack"
-            else:
-                continue
-            if plat not in platforms:
-                platform_order.append(plat)
-            platforms.setdefault(plat, []).append(var)
-
-        platform_labels = [
-            {
-                "Telegram": "📱 Telegram",
-                "Discord": "💬 Discord",
-                "Slack": "💼 Slack",
-            }.get(p, p)
-            for p in platform_order
-        ]
-
-        selected_indices = prompt_checklist(
-            "Which platforms would you like to set up?",
-            platform_labels,
-        )
-
-        for idx in selected_indices:
-            plat = platform_order[idx]
-            vars_list = platforms[plat]
-            emoji = {"Telegram": "📱", "Discord": "💬", "Slack": "💼"}.get(plat, "")
-            print()
-            print(color(f"  ─── {emoji} {plat} ───", Colors.CYAN))
-            print()
-            for var in vars_list:
-                print_info(f"  {var.get('description', '')}")
-                if var.get("url"):
-                    print_info(f"  {var['url']}")
-                if var.get("password"):
-                    value = prompt(f"  {var.get('prompt', var['name'])}", password=True)
-                else:
-                    value = prompt(f"  {var.get('prompt', var['name'])}")
-                if value:
-                    save_env_value(var["name"], value)
-                    print_success(f"  ✓ Saved")
-                else:
-                    print_warning(f"  Skipped")
-                print()
 
     # Handle missing config fields
     if missing_config:

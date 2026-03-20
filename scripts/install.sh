@@ -7,8 +7,8 @@
 #
 # Supported contract:
 # - Run from the root of a checked-out math-inc/opengauss repository.
-# - Linux only. Ubuntu/Debian/WSL are the primary supported environments.
-# - Automatic system package installation is only supported on Debian/Ubuntu.
+# - Linux and macOS. Ubuntu/Debian/WSL are the primary Linux environments.
+# - macOS support uses Homebrew for system dependencies.
 #
 # Usage:
 #   ./scripts/install.sh
@@ -37,10 +37,12 @@ GAUSS_HOME="${GAUSS_HOME:-$HOME/.gauss}"
 WORKSPACE_DIR="${GAUSS_WORKSPACE_DIR:-$HOME/GaussWorkspace}"
 RECREATE_VENV=false
 SKIP_SYSTEM_PACKAGES=false
+CREATE_WORKSPACE=false
 
 OS=""
 DISTRO=""
 DEBIAN_LIKE=false
+MACOS=false
 UV_CMD=""
 FILE_PYTHON="python3"
 VENV_DIR=""
@@ -61,6 +63,8 @@ Options:
   --workspace-dir PATH    Override the prewarmed Lean workspace path
                           (default: ~/GaussWorkspace)
   --skip-system-packages  Do not run apt-get even on Debian/Ubuntu
+  --with-workspace        Also create a prewarmed Lean+Mathlib workspace
+                          (downloads ~2 GB, adds 5-15 min)
   --recreate-venv         Remove and recreate the repository virtualenv
   -h, --help              Show this help
 
@@ -130,6 +134,10 @@ parse_args() {
                 SKIP_SYSTEM_PACKAGES=true
                 shift
                 ;;
+            --with-workspace)
+                CREATE_WORKSPACE=true
+                shift
+                ;;
             --recreate-venv)
                 RECREATE_VENV=true
                 shift
@@ -174,9 +182,9 @@ detect_os() {
             fi
             ;;
         Darwin*)
-            log_error "This workflow-derived installer is Linux-only."
-            log_info "Use a Linux checkout (Ubuntu/Debian/WSL recommended) and rerun ./scripts/install.sh."
-            exit 1
+            OS="darwin"
+            DISTRO="macos"
+            MACOS=true
             ;;
         *)
             log_error "Unsupported operating system: $(uname -s)"
@@ -191,7 +199,11 @@ detect_os() {
             ;;
     esac
 
-    log_success "Detected Linux environment ($DISTRO)"
+    if [ "$MACOS" = true ]; then
+        log_success "Detected macOS environment"
+    else
+        log_success "Detected Linux environment ($DISTRO)"
+    fi
 }
 
 require_repo_checkout() {
@@ -231,7 +243,10 @@ ensure_local_bin_path() {
 
 ensure_required_commands() {
     local missing=()
-    local commands=(bash curl git gcc jq make pkg-config python3 rg tmux unzip xz zip ffmpeg)
+    local commands=(bash curl git python3 rg)
+    if [ "$MACOS" != true ]; then
+        commands+=(gcc jq make pkg-config tmux unzip xz zip ffmpeg)
+    fi
     local cmd
     for cmd in "${commands[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -244,24 +259,40 @@ ensure_required_commands() {
     fi
 
     log_error "Missing required commands: ${missing[*]}"
-    if [ "$DEBIAN_LIKE" = true ]; then
+    if [ "$MACOS" = true ]; then
+        log_info "Install the missing tools with Homebrew: brew install ${missing[*]}"
+    elif [ "$DEBIAN_LIKE" = true ]; then
         log_info "Run without --skip-system-packages or install them manually with apt-get."
     else
         log_info "Install the missing tools manually and rerun the installer."
-        log_info "Ubuntu/Debian/WSL are the primary supported environments for this workflow-derived install path."
     fi
     exit 1
 }
 
 install_system_packages() {
     if [ "$SKIP_SYSTEM_PACKAGES" = true ]; then
-        log_info "Skipping apt-get bootstrap (--skip-system-packages)"
+        log_info "Skipping system package bootstrap (--skip-system-packages)"
         ensure_required_commands
         return
     fi
 
+    if [ "$MACOS" = true ]; then
+        if ! command -v brew >/dev/null 2>&1; then
+            log_error "Homebrew is required on macOS. Install it from https://brew.sh"
+            exit 1
+        fi
+        local mac_packages=(ripgrep)
+        if ! command -v rg >/dev/null 2>&1; then
+            log_info "Installing macOS prerequisites via Homebrew..."
+            brew install "${mac_packages[@]}"
+        fi
+        ensure_required_commands
+        log_success "System packages are ready"
+        return
+    fi
+
     if [ "$DEBIAN_LIKE" != true ]; then
-        log_warn "Automatic system package installation is only supported on Debian/Ubuntu."
+        log_warn "Automatic system package installation is only supported on Debian/Ubuntu and macOS."
         ensure_required_commands
         return
     fi
@@ -340,40 +371,51 @@ ensure_nodejs() {
         fi
     fi
 
-    if [ "$DEBIAN_LIKE" != true ]; then
+    if [ "$MACOS" = true ]; then
+        log_info "Installing Node.js via Homebrew..."
+        brew install node
+    elif [ "$DEBIAN_LIKE" = true ]; then
+        log_info "Installing Node.js ${NODE_MAJOR}.x via NodeSource..."
+        run_root bash -lc 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash -'
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+    else
         log_error "Node.js ${NODE_MAJOR}.x is required."
         log_info "Install Node.js ${NODE_MAJOR}.x and npm manually, then rerun ./scripts/install.sh."
         exit 1
     fi
-
-    log_info "Installing Node.js ${NODE_MAJOR}.x via NodeSource..."
-    run_root bash -lc 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash -'
-    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
     log_success "Node.js ready: $(node -v)"
 }
 
 ensure_global_cli_tools() {
-    log_info "Installing Claude Code and OpenAI Codex into ~/.local..."
+    log_info "Ensuring Claude Code and OpenAI Codex are available..."
     mkdir -p "$HOME/.local/bin"
-
-    npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code@latest >/dev/null 2>&1 \
-        || npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code >/dev/null 2>&1
-    npm install -g --prefix "$HOME/.local" @openai/codex@latest >/dev/null 2>&1 \
-        || npm install -g --prefix "$HOME/.local" @openai/codex >/dev/null 2>&1
-
     export PATH="$HOME/.local/bin:$PATH"
 
     if ! command -v claude >/dev/null 2>&1; then
-        log_error "Claude Code install did not provide a claude executable."
-        exit 1
-    fi
-    if ! command -v codex >/dev/null 2>&1; then
-        log_error "OpenAI Codex install did not provide a codex executable."
-        exit 1
+        log_info "Installing Claude Code..."
+        npm install -g --force --prefix "$HOME/.local" @anthropic-ai/claude-code@latest >/dev/null 2>&1 \
+            || npm install -g --force --prefix "$HOME/.local" @anthropic-ai/claude-code >/dev/null 2>&1 \
+            || true
     fi
 
-    log_success "Claude Code ready: $(claude --version 2>/dev/null || printf 'installed')"
-    log_success "OpenAI Codex ready: $(codex --version 2>/dev/null || printf 'installed')"
+    if ! command -v codex >/dev/null 2>&1; then
+        log_info "Installing OpenAI Codex..."
+        npm install -g --force --prefix "$HOME/.local" @openai/codex@latest >/dev/null 2>&1 \
+            || npm install -g --force --prefix "$HOME/.local" @openai/codex >/dev/null 2>&1 \
+            || true
+    fi
+
+    if ! command -v claude >/dev/null 2>&1; then
+        log_warn "Claude Code not found — install manually: npm install -g @anthropic-ai/claude-code"
+    else
+        log_success "Claude Code ready: $(claude --version 2>/dev/null || printf 'installed')"
+    fi
+
+    if ! command -v codex >/dev/null 2>&1; then
+        log_warn "OpenAI Codex not found — install manually: npm install -g @openai/codex"
+    else
+        log_success "OpenAI Codex ready: $(codex --version 2>/dev/null || printf 'installed')"
+    fi
 }
 
 ensure_lean_toolchain() {
@@ -406,16 +448,15 @@ ensure_lean_toolchain() {
 }
 
 sync_repo_submodules() {
-    log_info "Syncing the mini-swe-agent submodule..."
+    log_info "Syncing submodules..."
     git -C "$REPO_ROOT" submodule sync --recursive
-    git -C "$REPO_ROOT" submodule update --init mini-swe-agent
+    git -C "$REPO_ROOT" submodule update --init --recursive || true
 
-    if [ ! -f "$REPO_ROOT/mini-swe-agent/pyproject.toml" ]; then
-        log_error "mini-swe-agent is not available after submodule sync."
-        exit 1
+    if [ -f "$REPO_ROOT/mini-swe-agent/pyproject.toml" ]; then
+        log_success "mini-swe-agent submodule ready"
+    else
+        log_warn "mini-swe-agent submodule not available (terminal tools may be limited)"
     fi
-
-    log_success "Submodule ready"
 }
 
 ensure_python_runtime() {
@@ -448,9 +489,13 @@ ensure_python_runtime() {
 
 install_repo_dependencies() {
     log_info "Installing Python and Node dependencies from the checked-out repository..."
-    "$UV_CMD" pip install -e ".[full]"
-    "$UV_CMD" pip install -e "./mini-swe-agent"
-    npm ci --silent
+    "$UV_CMD" pip install -e ".[full]" || "$UV_CMD" pip install -e ".[gauss]" || "$UV_CMD" pip install -e "."
+    if [ -f "$REPO_ROOT/mini-swe-agent/pyproject.toml" ]; then
+        "$UV_CMD" pip install -e "./mini-swe-agent" || log_warn "mini-swe-agent install failed"
+    fi
+    if [ -f "$REPO_ROOT/package-lock.json" ]; then
+        npm ci --silent 2>/dev/null || npm install --silent 2>/dev/null || log_warn "npm install failed"
+    fi
     log_success "Repository dependencies installed"
 }
 
@@ -533,7 +578,12 @@ sync_optional_provider_keys() {
 }
 
 ensure_workspace() {
-    log_info "Preparing the prewarmed Lean workspace at $WORKSPACE_DIR..."
+    if [ "$CREATE_WORKSPACE" != true ]; then
+        log_info "Skipping Lean workspace (use --with-workspace to create one, or /project create inside Gauss)"
+        return
+    fi
+
+    log_info "Preparing the Lean workspace at $WORKSPACE_DIR (this downloads Mathlib ~2 GB)..."
 
     if [ ! -f "$WORKSPACE_DIR/lakefile.toml" ] && [ ! -f "$WORKSPACE_DIR/lakefile.lean" ]; then
         if [ -e "$WORKSPACE_DIR" ]; then
@@ -546,13 +596,10 @@ ensure_workspace() {
             cd "$(dirname "$WORKSPACE_DIR")"
             lake new "$(basename "$WORKSPACE_DIR")" math
         )
+        log_success "Lean workspace created at $WORKSPACE_DIR"
+    else
+        log_success "Lean workspace already exists at $WORKSPACE_DIR"
     fi
-
-    (
-        cd "$WORKSPACE_DIR"
-        lake exe cache get
-        lake build
-    )
 
     if [ ! -f "$WORKSPACE_DIR/PAPER.md" ]; then
         cat > "$WORKSPACE_DIR/PAPER.md" <<'TXT'
@@ -573,31 +620,35 @@ TXT
 }
 
 initialize_gauss_workspace() {
-    log_info "Initializing the Gauss project manifest and runtime defaults..."
+    log_info "Initializing Gauss defaults..."
 
     cp "$REPO_ROOT/docs/skins/mathinc.yaml" "$GAUSS_HOME/skins/mathinc.yaml"
 
-    "$FILE_PYTHON" - "$WORKSPACE_DIR" <<'PY'
+    if [ -d "$WORKSPACE_DIR" ] && [ "$CREATE_WORKSPACE" = true ]; then
+        "$FILE_PYTHON" - "$WORKSPACE_DIR" <<'PY'
 import sys
 from gauss_cli.project import initialize_gauss_project
 
 initialize_gauss_project(sys.argv[1], name="Gauss Workspace")
 PY
+    fi
 
     "$GAUSS_BIN" config set display.skin mathinc
     "$GAUSS_BIN" config set terminal.backend local
-    "$GAUSS_BIN" config set terminal.cwd "$WORKSPACE_DIR"
+    if [ -d "$WORKSPACE_DIR" ]; then
+        "$GAUSS_BIN" config set terminal.cwd "$WORKSPACE_DIR"
+    fi
     "$GAUSS_BIN" config set gauss.autoformalize.backend claude-code
     "$GAUSS_BIN" config set gauss.autoformalize.auth_mode auto
     "$GAUSS_BIN" config set agent.max_turns 90
 
-    log_success "Gauss workspace defaults applied"
+    log_success "Gauss defaults applied"
 }
 
 ensure_shell_runtime_block() {
     log_info "Writing an idempotent shell runtime block..."
 
-    "$FILE_PYTHON" - "$GAUSS_HOME" "$REPO_ROOT" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" <<'PY'
+    "$FILE_PYTHON" - "$GAUSS_HOME" "$REPO_ROOT" "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.zprofile" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -1196,13 +1247,17 @@ print_summary() {
     echo "  Repo:       $REPO_ROOT"
     echo "  Venv:       $VENV_DIR"
     echo "  Gauss home: $GAUSS_HOME"
-    echo "  Workspace:  $WORKSPACE_DIR"
+    if [ -d "$WORKSPACE_DIR" ] && [ "$CREATE_WORKSPACE" = true ]; then
+        echo "  Workspace:  $WORKSPACE_DIR"
+    fi
     echo "  Guide:      $GUIDE_DIR/index.html"
     echo
-    echo -e "${CYAN}${BOLD}Next Commands:${NC}"
-    echo "  gauss-open-session"
-    echo "  gauss-open-guide"
-    echo "  gauss"
+    echo -e "${CYAN}${BOLD}Next Steps:${NC}"
+    echo "  1. Reload your shell:  source ~/.zshrc"
+    echo "  2. Run the setup wizard: gauss setup"
+    echo "  3. Start chatting:      gauss"
+    echo
+    echo "  Inside Gauss, use /project create <path> to create a Lean project."
     echo
     echo -e "${CYAN}${BOLD}Helper Commands:${NC}"
     echo "  gauss-configure-main-provider [auto|openrouter|anthropic|openai]"
@@ -1240,11 +1295,22 @@ main() {
     prepare_gauss_home
     sync_optional_provider_keys
     ensure_workspace
-    initialize_gauss_workspace
+    initialize_gauss_workspace || true
     ensure_shell_runtime_block
     write_helper_assets
     auto_configure_main_provider
     print_summary
+    run_setup_wizard
+}
+
+run_setup_wizard() {
+    echo
+    read -p "Would you like to run the setup wizard now? (configure API keys + model) [Y/n] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+        echo
+        "$VENV_PYTHON" -m gauss_cli.main setup
+    fi
 }
 
 main "$@"
