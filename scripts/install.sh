@@ -435,7 +435,7 @@ ensure_lean_toolchain() {
         exit 1
     fi
 
-    elan toolchain install stable >/dev/null 2>&1 || true
+   elan toolchain install stable || echo "Lean already installed or skipping..."
     elan default stable >/dev/null 2>&1
 
     if ! command -v lake >/dev/null 2>&1; then
