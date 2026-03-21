@@ -1,7 +1,6 @@
 <p align="center">
   <a href="https://morph.new/gauss-batteries-opengauss-dev-wipv2-latest-20260319-024019">
-    <img src="https://img.shields.io/badge/Open%20in-Morph-f23f42?style=for-the-badge" alt="Open in Morph">
-  </a>
+    <img src="https://img.shields.io/badge/Open%20in-Morph-f23f42?style=for-the-badge" alt="Open in Morph" /></a> &nbsp;&nbsp; <a href="https://tluma.ai/ask-ai/math-inc/OpenGauss"><img src="https://tluma.ai/badge?h=28&color=ff4444&fontScale=0.7" alt="Ask AI" /></a>
 </p>
 
 # Open Gauss
