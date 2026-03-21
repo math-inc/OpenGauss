@@ -33,15 +33,15 @@ We value contributions in this order:
 | Requirement | Notes |
 |-------------|-------|
 | **Git** | With `--recurse-submodules` support |
-| **Python 3.10+** | uv will install it if missing |
+| **Python 3.11+** | uv will install it if missing |
 | **uv** | Fast Python package manager ([install](https://docs.astral.sh/uv/)) |
 | **Node.js 18+** | Optional — needed for browser tools and WhatsApp bridge |
 
 ### Clone and Install
 
 ```bash
-git clone --recurse-submodules https://github.com/NousResearch/gauss-agent.git
-cd gauss-agent
+git clone --recurse-submodules https://github.com/math-inc/OpenGauss.git
+cd OpenGauss
 
 # Create venv with Python 3.11
 uv venv venv --python 3.11
@@ -216,7 +216,7 @@ fix(security): prevent shell injection in sudo password piping
 
 ## Reporting Issues
 
-- Use [GitHub Issues](https://github.com/NousResearch/gauss-agent/issues)
+- Use [GitHub Issues](https://github.com/math-inc/OpenGauss/issues)
 - Include: OS, Python version, Gauss version (`gauss version`), full error traceback
 - Include steps to reproduce
 - Check existing issues before creating duplicates
@@ -230,4 +230,4 @@ fix(security): prevent shell injection in sudo password piping
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](https://github.com/NousResearch/gauss-agent/blob/main/LICENSE).
+By contributing, you agree that your contributions will be licensed under the [MIT License](https://github.com/math-inc/OpenGauss/blob/main/LICENSE).
