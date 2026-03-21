@@ -43,6 +43,14 @@ After install, reload your shell and start Gauss:
 source ~/.zshrc   # or ~/.bashrc
 gauss
 ```
+## Configuration
+
+### 🖥️ Using Local Models (vLLM)
+If you prefer to run models locally (e.g., using a local GPU) to save on API costs:
+
+1. **Start your vLLM server** (OpenAI-compatible):
+   ```bash
+   python -m vllm.entrypoints.openai.api_server --model <model_name>
 
 ### Options
 
