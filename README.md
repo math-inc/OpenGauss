@@ -2,6 +2,9 @@
   <a href="https://morph.new/opengauss">
     <img src="https://img.shields.io/badge/Open%20in-Morph-f23f42?style=for-the-badge" alt="Open in Morph">
   </a>
+  <a href="https://gitcgr.com/math-inc/OpenGauss">
+    <img src="https://gitcgr.com/badge/math-inc/OpenGauss.svg" alt="gitcgr" />
+  </a>
 </p>
 
 # Open Gauss
