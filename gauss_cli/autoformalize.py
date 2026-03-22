@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -529,6 +530,31 @@ def _has_local_claude_auth(real_home: Path) -> bool:
     return _has_local_claude_login(real_home) or _has_local_claude_api_key(real_home)
 
 
+def _read_keychain_claude_credentials() -> str | None:
+    """Return the Claude Code OAuth credentials JSON from the macOS Keychain, or ``None``."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        payload = result.stdout.strip()
+        if not payload:
+            return None
+        data = json.loads(payload)
+        oauth = data.get("claudeAiOauth")
+        if isinstance(oauth, Mapping) and str(oauth.get("accessToken", "")).strip():
+            return payload
+    except Exception:
+        pass
+    return None
+
+
 def _has_local_claude_login(real_home: Path) -> bool:
     credentials = real_home / ".claude" / ".credentials.json"
     if credentials.exists():
@@ -539,7 +565,7 @@ def _has_local_claude_login(real_home: Path) -> bool:
                 return True
         except Exception:
             pass
-    return False
+    return _read_keychain_claude_credentials() is not None
 
 
 def _load_local_claude_config(real_home: Path) -> dict[str, Any]:
@@ -1164,8 +1190,13 @@ def _stage_claude_credentials(
     destination_credentials = managed_claude_dir / ".credentials.json"
     if destination_credentials.exists():
         destination_credentials.unlink()
-    if copy_oauth_credentials and source_credentials.exists():
-        shutil.copy2(source_credentials, destination_credentials)
+    if copy_oauth_credentials:
+        if source_credentials.exists():
+            shutil.copy2(source_credentials, destination_credentials)
+        else:
+            keychain_payload = _read_keychain_claude_credentials()
+            if keychain_payload:
+                destination_credentials.write_text(keychain_payload, encoding="utf-8")
 
     payload = _load_json_dict(managed_key_path)
     payload.update(_load_local_claude_config(real_home))

@@ -465,6 +465,44 @@ def test_build_claude_runtime_with_local_login_stages_managed_env_and_prompt(mon
     assert payload["mcpServers"]["lean-lsp"]["env"]["LEAN_PROJECT_PATH"] == str(shared_bundle.project.lean_root)
 
 
+def test_build_claude_runtime_falls_back_to_macos_keychain_when_credentials_file_absent(monkeypatch, tmp_path: Path):
+    shared_bundle = _shared_bundle(tmp_path)
+    workflow = _workflow("/prove", "File.lean")
+    installed_plugin_root = (
+        tmp_path
+        / "managed"
+        / "claude-home"
+        / ".claude"
+        / "plugins"
+        / "cache"
+        / "lean4-skills"
+        / "lean4"
+        / "4.4.0"
+    )
+    (installed_plugin_root / "skills" / "lean4").mkdir(parents=True)
+    (installed_plugin_root / "skills" / "lean4" / "SKILL.md").write_text("# Lean4\n", encoding="utf-8")
+    keychain_payload = json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-test"}})
+    monkeypatch.setattr(autoformalize, "_require_executable", lambda name, _msg, _env: f"/usr/bin/{name}")
+    monkeypatch.setattr(autoformalize, "_claude_permission_args", lambda: ("--dangerously-skip-permissions",))
+    monkeypatch.setattr(autoformalize, "_install_managed_claude_plugin", lambda **_kwargs: installed_plugin_root)
+    monkeypatch.setattr(autoformalize, "_read_keychain_claude_credentials", lambda: keychain_payload)
+
+    runtime = autoformalize._build_claude_runtime(
+        auth_mode="auto",
+        user_instruction=workflow.workflow_args,
+        workflow=workflow,
+        base_environment={"HOME": str(shared_bundle.real_home), "PATH": "/usr/bin"},
+        include_persisted_env=False,
+        shared_bundle=shared_bundle,
+    )
+
+    managed_credentials = runtime.managed_context.backend_home / ".claude" / ".credentials.json"
+    assert managed_credentials.exists()
+    staged = json.loads(managed_credentials.read_text(encoding="utf-8"))
+    assert staged["claudeAiOauth"]["accessToken"] == "sk-ant-oat01-test"
+    assert "ANTHROPIC_API_KEY" not in runtime.child_env
+
+
 def test_build_claude_runtime_accepts_anthropic_api_key(monkeypatch, tmp_path: Path):
     shared_bundle = _shared_bundle(tmp_path)
     workflow = _workflow("/formalize")
@@ -483,6 +521,7 @@ def test_build_claude_runtime_accepts_anthropic_api_key(monkeypatch, tmp_path: P
     monkeypatch.setattr(autoformalize, "_require_executable", lambda name, _msg, _env: f"/usr/bin/{name}")
     monkeypatch.setattr(autoformalize, "_claude_permission_args", lambda: ("--dangerously-skip-permissions",))
     monkeypatch.setattr(autoformalize, "_install_managed_claude_plugin", lambda **_kwargs: installed_plugin_root)
+    monkeypatch.setattr(autoformalize, "_read_keychain_claude_credentials", lambda: None)
 
     runtime = autoformalize._build_claude_runtime(
         auth_mode="auto",
