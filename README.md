@@ -106,7 +106,7 @@ gauss update
 
 ```
 gauss                         # Launch the CLI
-/project create ~/my-project  # Create a new Lean project
+/project create ~/my-project --template-source <template-or-git-url>
 /prove 1+1=2                  # Spawn a proving agent
 /swarm                        # See running agents
 ```
@@ -137,6 +137,10 @@ Gauss treats Lean work as project-scoped by default. Before launching managed wo
 - `/project create <path> [--template-source <source>] [--name <name>]` bootstraps a project from a template and registers it
 - `/project use [path]` pins the current session to an existing Gauss project
 - `/project clear` removes the session override and falls back to ambient project discovery
+
+If you use `/project create` often, set a default template once with
+`gauss.project.template_source` in `~/.gauss/config.yaml` or the
+`GAUSS_BLUEPRINT_TEMPLATE_SOURCE` environment variable.
 
 Gauss discovers `.gauss/project.yaml` upward from the current working directory, but managed workflow child agents launch from the active project root so the forwarded Lean workflow command always runs in the right project context.
 
@@ -169,6 +173,9 @@ Gauss discovers `.gauss/project.yaml` upward from the current working directory,
 - An active Gauss project selected via `.gauss/project.yaml`
 
 Gauss checks these before launch and tells you exactly what is missing.
+`gauss doctor` also reports the managed-workflow backend, auth mode, `uv` / `lake`
+availability, and whether the current working directory resolves to an active
+Gauss project.
 
 ---
 

@@ -9,6 +9,7 @@ import sys
 import subprocess
 import shutil
 from pathlib import Path
+from typing import Any, Mapping
 
 from gauss_cli.branding import get_cli_command_name, get_product_name, rewrite_cli_references
 from gauss_cli.config import get_project_root, get_gauss_home, get_env_path
@@ -104,6 +105,189 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
     else:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
+
+
+def _check_managed_workflow_requirements(
+    issues: list[str],
+    *,
+    config: Mapping[str, Any] | None = None,
+    env: Mapping[str, str] | None = None,
+    active_cwd: str | Path | None = None,
+    cli_name: str | None = None,
+) -> None:
+    """Report Lean workflow prerequisites that are specific to Open Gauss."""
+    try:
+        from gauss_cli.autoformalize import (
+            CODEX_AUTOFORMALIZE_BACKEND,
+            DEFAULT_AUTOFORMALIZE_BACKEND,
+            _codex_auth_payload_has_api_key,
+            _codex_auth_payload_is_valid,
+            _has_local_claude_api_key,
+            _has_local_claude_login,
+            _load_local_codex_auth_payload,
+            _resolve_auth_mode,
+            _resolve_backend_name,
+            _resolve_claude_auth_env,
+            _resolve_codex_api_key,
+            _resolve_uv_runner,
+        )
+        from gauss_cli.project import (
+            ProjectManifestError,
+            ProjectNotFoundError,
+            discover_gauss_project,
+            resolve_template_source,
+        )
+    except Exception as exc:
+        print()
+        print(color("◆ Managed Lean Workflows", Colors.CYAN, Colors.BOLD))
+        check_warn("Managed workflow diagnostics unavailable", f"({exc})")
+        return
+
+    from gauss_cli.config import load_config
+
+    cli_name = cli_name or get_cli_command_name()
+    environment = dict(env or os.environ)
+    resolved_config = config if isinstance(config, Mapping) else load_config()
+
+    print()
+    print(color("◆ Managed Lean Workflows", Colors.CYAN, Colors.BOLD))
+
+    try:
+        backend_name = _resolve_backend_name(resolved_config, environment)
+        auth_mode = _resolve_auth_mode(resolved_config, environment)
+    except Exception as exc:
+        check_fail("Managed workflow config", f"({exc})")
+        issues.append(f"Fix gauss.autoformalize config: {exc}")
+        return
+
+    check_ok("Managed backend", f"({backend_name})")
+    check_ok("Managed auth mode", f"({auth_mode})")
+
+    template_source = resolve_template_source(resolved_config, environment)
+    if template_source:
+        check_ok("Project template source", f"({template_source})")
+    else:
+        check_warn(
+            "Project template source",
+            "(`/project create` needs `--template-source` or `gauss.project.template_source`)",
+        )
+
+    try:
+        uv_runner = _resolve_uv_runner(environment)
+        check_ok("uv / uvx", f"({Path(uv_runner[0]).name})")
+    except Exception as exc:
+        check_fail("uv / uvx", f"({exc})")
+        issues.append("Install uv so Gauss can launch the managed Lean MCP server")
+
+    lake_executable = shutil.which("lake", path=environment.get("PATH"))
+    if lake_executable:
+        check_ok("Lean toolchain (lake)", f"({lake_executable})")
+    else:
+        check_fail("Lean toolchain (lake)", "(required for managed Lean workflows)")
+        issues.append("Install elan / Lean so `lake` is available on PATH")
+
+    active_dir = Path(active_cwd or environment.get("TERMINAL_CWD") or os.getcwd()).expanduser().resolve()
+    if active_dir.exists():
+        check_ok("Active working directory", f"({active_dir})")
+        try:
+            project = discover_gauss_project(active_dir)
+            check_ok("Active Gauss project", f"({project.label})")
+        except ProjectNotFoundError:
+            check_warn("Active Gauss project", f"(none under {active_dir})")
+            issues.append(
+                "Create or select a Gauss project with `/project init`, `/project convert`, or `/project use <path>`"
+            )
+        except ProjectManifestError as exc:
+            check_fail("Gauss project manifest", f"({exc})")
+            issues.append(f"Repair the active Gauss project manifest: {exc}")
+    else:
+        check_fail("Active working directory", f"({active_dir} does not exist)")
+        issues.append(f"Fix the managed workflow working directory: {active_dir}")
+
+    real_home = Path(environment.get("HOME", str(Path.home()))).expanduser().resolve()
+
+    if backend_name == DEFAULT_AUTOFORMALIZE_BACKEND:
+        claude_executable = shutil.which("claude", path=environment.get("PATH"))
+        if claude_executable:
+            check_ok("Claude Code CLI", f"({claude_executable})")
+        else:
+            check_fail("Claude Code CLI", "(install with `npm install -g @anthropic-ai/claude-code`)")
+            issues.append("Install the Claude Code CLI for managed Lean workflows")
+
+        has_local_login = _has_local_claude_login(real_home)
+        has_local_api_key = _has_local_claude_api_key(real_home)
+        staged_auth_env = _resolve_claude_auth_env(environment, include_persisted_env=True)
+        staged_keys = ", ".join(sorted(staged_auth_env))
+
+        if auth_mode == "auto":
+            if has_local_login:
+                check_ok("Claude auth", "(local Claude login)")
+            elif has_local_api_key:
+                check_ok("Claude auth", "(local Claude API key)")
+            elif staged_auth_env:
+                check_ok("Claude auth", f"(staged via {staged_keys})")
+            else:
+                check_fail("Claude auth", "(not found)")
+                issues.append(
+                    "Run `claude auth login`, save `ANTHROPIC_API_KEY`, or set `gauss.autoformalize.auth_mode: login`"
+                )
+        elif auth_mode == "login":
+            if has_local_login:
+                check_ok("Claude auth", "(local Claude login)")
+            elif has_local_api_key:
+                check_ok("Claude auth", "(local Claude API key)")
+            else:
+                check_warn("Claude auth", "(login mode will prompt on first launch)")
+        else:
+            if staged_auth_env:
+                check_ok("Claude API-key auth", f"(staged via {staged_keys})")
+            elif has_local_api_key:
+                check_ok("Claude API-key auth", "(local Claude API key)")
+            else:
+                check_fail("Claude API-key auth", "(not found)")
+                issues.append(
+                    "Save `ANTHROPIC_API_KEY` / `ANTHROPIC_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`, or switch `gauss.autoformalize.auth_mode` back to `auto` or `login`"
+                )
+        return
+
+    if backend_name == CODEX_AUTOFORMALIZE_BACKEND:
+        codex_executable = shutil.which("codex", path=environment.get("PATH"))
+        if codex_executable:
+            check_ok("Codex CLI", f"({codex_executable})")
+        else:
+            check_fail("Codex CLI", "(install the OpenAI Codex CLI)")
+            issues.append("Install the OpenAI Codex CLI for managed Lean workflows")
+
+        local_auth_payload = _load_local_codex_auth_payload(real_home, environment)
+        has_local_auth = _codex_auth_payload_is_valid(local_auth_payload)
+        has_local_api_key = _codex_auth_payload_has_api_key(local_auth_payload)
+        staged_api_key = _resolve_codex_api_key(environment, include_persisted_env=True)
+
+        if auth_mode == "auto":
+            if has_local_auth:
+                check_ok("Codex auth", "(local Codex auth)")
+            elif staged_api_key:
+                check_ok("Codex auth", "(staged OPENAI_API_KEY)")
+            else:
+                check_fail("Codex auth", "(not found)")
+                issues.append(
+                    "Run `codex login`, save `OPENAI_API_KEY`, or set `gauss.autoformalize.auth_mode: login`"
+                )
+        elif auth_mode == "login":
+            if has_local_auth:
+                check_ok("Codex auth", "(local Codex auth)")
+            else:
+                check_warn("Codex auth", "(login mode will prompt on first launch)")
+        else:
+            if staged_api_key:
+                check_ok("Codex API-key auth", "(staged OPENAI_API_KEY)")
+            elif has_local_api_key:
+                check_ok("Codex API-key auth", "(local Codex API key)")
+            else:
+                check_fail("Codex API-key auth", "(not found)")
+                issues.append(
+                    "Save `OPENAI_API_KEY`, or switch `gauss.autoformalize.auth_mode` back to `auto` or `login`"
+                )
 
 
 def run_doctor(args):
@@ -484,6 +668,8 @@ def run_doctor(args):
                     check_ok(f"{label} deps", f"({moderate} moderate vulnerability(ies))")
             except Exception:
                 pass
+
+    _check_managed_workflow_requirements(issues, cli_name=cli_name)
 
     # =========================================================================
     # Check: API connectivity

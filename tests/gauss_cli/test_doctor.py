@@ -1,9 +1,11 @@
 """Tests for gauss_cli.doctor."""
 
+import json
 import os
 import sys
 import types
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +13,7 @@ import gauss_cli.doctor as doctor
 import gauss_cli.gateway as gateway_cli
 from gauss_cli import doctor as doctor_mod
 from gauss_cli.doctor import _has_provider_env_config
+from gauss_cli.project import initialize_gauss_project
 
 
 class TestProviderEnvDetection:
@@ -101,3 +104,82 @@ def test_check_gateway_service_linger_skips_when_service_not_installed(monkeypat
     out = capsys.readouterr().out
     assert out == ""
     assert issues == []
+
+
+def _write_executable(path: Path) -> None:
+    path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_check_managed_workflow_requirements_reports_healthy_claude_setup(tmp_path, capsys):
+    bin_dir = tmp_path / "bin"
+    home_dir = tmp_path / "home"
+    project_root = tmp_path / "project"
+    bin_dir.mkdir()
+    (home_dir / ".claude").mkdir(parents=True)
+    for name in ("claude", "uvx", "lake"):
+        _write_executable(bin_dir / name)
+
+    (home_dir / ".claude" / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "token"}}),
+        encoding="utf-8",
+    )
+    project_root.mkdir()
+    (project_root / "lakefile.lean").write_text("-- lean project\n", encoding="utf-8")
+    initialize_gauss_project(project_root, name="Demo Project")
+
+    issues: list[str] = []
+    doctor._check_managed_workflow_requirements(
+        issues,
+        config={
+            "gauss": {
+                "autoformalize": {"backend": "claude-code", "auth_mode": "auto"},
+                "project": {"template_source": "https://example.com/template.git"},
+            }
+        },
+        env={"PATH": str(bin_dir), "HOME": str(home_dir)},
+        active_cwd=project_root,
+        cli_name="gauss",
+    )
+
+    output = capsys.readouterr().out
+    assert "Managed Lean Workflows" in output
+    assert "Managed backend" in output
+    assert "claude-code" in output
+    assert "Active Gauss project" in output
+    assert "Demo Project" in output
+    assert "Claude auth" in output
+    assert "local Claude login" in output
+    assert issues == []
+
+
+def test_check_managed_workflow_requirements_reports_missing_codex_prereqs(tmp_path, capsys):
+    missing_project_dir = tmp_path / "outside"
+    home_dir = tmp_path / "home"
+    missing_project_dir.mkdir()
+    home_dir.mkdir()
+
+    issues: list[str] = []
+    doctor._check_managed_workflow_requirements(
+        issues,
+        config={
+            "gauss": {
+                "autoformalize": {"backend": "codex", "auth_mode": "api-key"},
+            }
+        },
+        env={"PATH": "", "HOME": str(home_dir)},
+        active_cwd=missing_project_dir,
+        cli_name="gauss",
+    )
+
+    output = capsys.readouterr().out
+    assert "Codex CLI" in output
+    assert "Codex API-key auth" in output
+    assert "Active Gauss project" in output
+    assert "uv / uvx" in output
+    assert "Lean toolchain (lake)" in output
+    assert any("Codex CLI" in issue or "OpenAI Codex CLI" in issue for issue in issues)
+    assert any("OPENAI_API_KEY" in issue for issue in issues)
+    assert any("/project init" in issue for issue in issues)
+    assert any("uv" in issue for issue in issues)
+    assert any("lake" in issue for issue in issues)
