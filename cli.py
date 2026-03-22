@@ -1631,18 +1631,10 @@ class GaussCLI:
         resolved_provider = runtime.get("provider", "openrouter")
         resolved_api_mode = runtime.get("api_mode", self.api_mode)
         if not isinstance(api_key, str) or not api_key:
-            self.console.print(
-                "[bold red]No API key configured.[/] "
-                "Run [bold]gauss setup[/] or set "
-                "[bold]OPENROUTER_API_KEY[/], [bold]ANTHROPIC_API_KEY[/], "
-                "or [bold]OPENAI_API_KEY[/]."
-            )
+            self.console.print("[bold red]Provider resolver returned an empty API key.[/]")
             return False
         if not isinstance(base_url, str) or not base_url:
-            self.console.print(
-                "[bold red]No provider base URL configured.[/] "
-                "Run [bold]gauss setup[/] to configure a model provider."
-            )
+            self.console.print("[bold red]Provider resolver returned an empty base URL.[/]")
             return False
 
         credentials_changed = api_key != self.api_key or base_url != self.base_url
@@ -7433,6 +7425,8 @@ def main(
     # Handle single query mode
     if query:
         if quiet:
+            # Quiet mode: suppress banner, spinner, tool previews.
+            # Only print the final response and parseable session info.
             cli.tool_progress_mode = "off"
             if cli._init_agent():
                 cli.agent.quiet_mode = True
@@ -7441,9 +7435,6 @@ def main(
                 if response:
                     print(response)
                 print(f"\nsession_id: {cli.session_id}")
-            else:
-                print("Error: No model provider configured. Run 'gauss setup' first.", file=sys.stderr)
-                sys.exit(1)
         else:
             cli.show_banner()
             cli.console.print(f"[bold blue]Query:[/] {query}")
