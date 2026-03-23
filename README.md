@@ -35,12 +35,27 @@ The installer will:
 3. Create a Python virtualenv and install Gauss
 4. Link the `gauss` command to `~/.local/bin/gauss`
 5. Set up `~/.gauss/` for runtime config and secrets
-6. Run the setup wizard to configure your API keys and model
+6. Auto-configure the main provider/model from staged keys when possible
 
-After install, reload your shell and start Gauss:
+`~/.local/bin/gauss` is ready immediately after install. To use plain `gauss` in the same terminal, reload your shell first:
 
 ```bash
-source ~/.zshrc   # or ~/.bashrc
+source ~/.bashrc   # bash
+source ~/.zshrc    # zsh
+gauss
+```
+
+Run `gauss setup` later if you want to review or change the selected provider, model, or other settings.
+
+If you prefer Gauss to create a prewarmed Lean workspace during install:
+
+```bash
+./scripts/install.sh --with-workspace
+```
+
+Otherwise, after install just start Gauss:
+
+```bash
 gauss
 ```
 ## Configuration
@@ -51,10 +66,12 @@ If you prefer to run models locally (e.g., using a local GPU) to save on API cos
 1. **Start your vLLM server** (OpenAI-compatible):
    ```bash
    python -m vllm.entrypoints.openai.api_server --model <model_name>
+   ```
+2. **Point Gauss at that server** with `gauss setup`, or update `OPENAI_BASE_URL` in `~/.gauss/.env`.
 
 ### Options
 
-```
+```bash
 ./scripts/install.sh --with-workspace    # Also create a prewarmed Lean+Mathlib workspace (~2 GB download)
 ./scripts/install.sh --skip-system-packages  # Skip Homebrew/apt package installation
 ./scripts/install.sh --recreate-venv     # Force-recreate the Python virtualenv
