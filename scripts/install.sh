@@ -38,6 +38,7 @@ WORKSPACE_DIR="${GAUSS_WORKSPACE_DIR:-$HOME/GaussWorkspace}"
 RECREATE_VENV=false
 SKIP_SYSTEM_PACKAGES=false
 CREATE_WORKSPACE=false
+AUTO_CONFIGURED_MAIN_PROVIDER=false
 
 OS=""
 DISTRO=""
@@ -1228,6 +1229,7 @@ PY_HELPERS
 auto_configure_main_provider() {
     log_info "Applying workflow-style main provider auto-selection..."
     if provider_status="$("$HOME/.local/bin/gauss-configure-main-provider" auto 2>&1)"; then
+        AUTO_CONFIGURED_MAIN_PROVIDER=true
         log_success "$provider_status"
     else
         log_warn "$provider_status"
@@ -1253,9 +1255,10 @@ print_summary() {
     echo "  Guide:      $GUIDE_DIR/index.html"
     echo
     echo -e "${CYAN}${BOLD}Next Steps:${NC}"
-    echo "  1. Reload your shell:  source ~/.zshrc"
-    echo "  2. Run the setup wizard: gauss setup"
-    echo "  3. Start chatting:      gauss"
+    echo "  1. Start immediately:   $GAUSS_BIN"
+    echo "  2. Reload for \`gauss\`: source ~/.bashrc   # bash"
+    echo "                          source ~/.zshrc    # zsh"
+    echo "  3. Review settings:     gauss setup"
     echo
     echo "  Inside Gauss, use /project create <path> to create a Lean project."
     echo
@@ -1270,6 +1273,8 @@ print_summary() {
     echo
     echo -e "${CYAN}${BOLD}Notes:${NC}"
     echo "  - The installer keeps code in your existing repository checkout."
+    echo "  - The installer updates future shells, but it cannot change PATH in the shell that launched ./scripts/install.sh."
+    echo "  - If \`gauss\` is not found in this terminal yet, use $GAUSS_BIN once or source one of the shell files above."
     echo "  - The local guide is written to $GUIDE_DIR/index.html."
     echo "  - No Morph iframe is exposed automatically; use gauss-open-guide if you want the local guide in a browser."
     echo "  - No tmux session is opened during install; use gauss-open-session when you want the workflow launcher."
@@ -1304,6 +1309,13 @@ main() {
 }
 
 run_setup_wizard() {
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        return
+    fi
+    if [ "$AUTO_CONFIGURED_MAIN_PROVIDER" = true ]; then
+        log_info "Skipping setup wizard prompt because the main provider was auto-configured. Run \`gauss setup\` any time to review or change it."
+        return
+    fi
     echo
     read -p "Would you like to run the setup wizard now? (configure API keys + model) [Y/n] " -n 1 -r
     echo

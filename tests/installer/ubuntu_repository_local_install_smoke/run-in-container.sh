@@ -33,10 +33,31 @@ echo "==> Installer scenario: ubuntu_repository_local_install_smoke"
 echo "==> Using repository checkout: $REPO_ROOT"
 
 cd "$REPO_ROOT"
+INSTALL_LOG="$(mktemp)"
+PATH_HAS_LOCAL_BIN=0
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*)
+        PATH_HAS_LOCAL_BIN=1
+        ;;
+esac
 export OPENAI_API_KEY
 ./scripts/install.sh \
     --gauss-home "$GAUSS_HOME" \
-    --workspace-dir "$WORKSPACE_DIR"
+    --workspace-dir "$WORKSPACE_DIR" \
+    --with-workspace \
+    2>&1 | tee "$INSTALL_LOG"
+
+echo "==> Verifying first-run shell guidance"
+assert_exists "$HOME/.local/bin/gauss"
+grep -F "Start immediately:" "$INSTALL_LOG" >/dev/null || die "expected installer summary to show the direct gauss path"
+grep -F "$HOME/.local/bin/gauss" "$INSTALL_LOG" >/dev/null || die "expected installer summary to print the linked gauss path"
+grep -F "cannot change PATH in the shell that launched ./scripts/install.sh" "$INSTALL_LOG" >/dev/null || die "expected installer summary to explain current-shell PATH behavior"
+if grep -F "Would you like to run the setup wizard now?" "$INSTALL_LOG" >/dev/null; then
+    die "expected installer to skip the setup wizard prompt when a main provider was auto-configured"
+fi
+if [ "$PATH_HAS_LOCAL_BIN" -ne 1 ] && command -v gauss >/dev/null 2>&1; then
+    die "expected gauss to stay off PATH until the shell is reloaded"
+fi
 
 export PATH="$HOME/.local/bin:$REPO_ROOT/venv/bin:$HOME/.elan/bin:$PATH"
 export GAUSS_HOME
@@ -101,6 +122,7 @@ unset OPENAI_API_KEY OPENROUTER_API_KEY ANTHROPIC_API_KEY
 ./scripts/install.sh \
     --gauss-home "$GAUSS_HOME" \
     --workspace-dir "$WORKSPACE_DIR" \
+    --with-workspace \
     --skip-system-packages
 grep -F 'SMOKE_RERUN_MARKER' "$WORKSPACE_DIR/PAPER.md" >/dev/null || die "expected PAPER.md marker to survive rerun"
 assert_exists "$WORKSPACE_DIR/KEEP_ME.txt"
