@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://morph.new/gauss-batteries-opengauss-dev-wipv2-latest-20260319-024019">
+  <a href="https://morph.new/opengauss">
     <img src="https://img.shields.io/badge/Open%20in-Morph-f23f42?style=for-the-badge" alt="Open in Morph" /></a> &nbsp;&nbsp; <a href="https://tluma.ai/ask-ai/math-inc/OpenGauss"><img src="https://tluma.ai/badge?h=28&color=ff4444&fontScale=0.7" alt="Ask AI" /></a>
 </p>
 
@@ -42,6 +42,14 @@ After install, reload your shell and start Gauss:
 source ~/.zshrc   # or ~/.bashrc
 gauss
 ```
+## Configuration
+
+### 🖥️ Using Local Models (vLLM)
+If you prefer to run models locally (e.g., using a local GPU) to save on API costs:
+
+1. **Start your vLLM server** (OpenAI-compatible):
+   ```bash
+   python -m vllm.entrypoints.openai.api_server --model <model_name>
 
 ### Options
 
