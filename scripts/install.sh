@@ -1354,6 +1354,11 @@ print_summary() {
     echo "                          $secondary_reload   # if you switch to $secondary_label"
     echo "  4. Review settings:     gauss setup"
     echo
+    echo -e "${CYAN}${BOLD}Start Options:${NC}"
+    echo "  gauss                # direct CLI launch in this terminal"
+    echo "  gauss-open-session   # batteries-included launcher (tmux when interactive)"
+    echo "  gauss-open-guide     # open the local guide in a browser, or print its path"
+    echo
     echo "  Inside Gauss, use /project create <path> to create a Lean project."
     echo
     echo -e "${CYAN}${BOLD}Helper Commands:${NC}"
