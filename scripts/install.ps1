@@ -1,914 +1,361 @@
 # ============================================================================
-# Gauss Installer for Windows
+# Open Gauss WSL Installer Bootstrap
 # ============================================================================
-# Installation script for Windows (PowerShell).
-# Uses uv for fast Python provisioning and package management.
+# Windows convenience wrapper that installs Open Gauss inside WSL2 using the
+# shared installer flow.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/morph-labs/gauss-agent/main/scripts/install.ps1 | iex
-#
-# Or download and run with options:
-#   .\install.ps1 -NoVenv -SkipSetup
+#   .\scripts\install.ps1
+#   .\scripts\install.ps1 -WithWorkspace
+#   .\scripts\install.ps1 -Distro Ubuntu
+#   .\scripts\install.ps1 -LinuxRepoDir "~/OpenGauss"
 #
 # ============================================================================
 
 param(
-    [switch]$NoVenv,
-    [switch]$SkipSetup,
-    [string]$Branch = "main",
-    [string]$GaussHome = "$env:LOCALAPPDATA\gauss",
-    [string]$InstallDir = "$env:LOCALAPPDATA\gauss\gauss-agent"
+    [switch]$WithWorkspace,
+    [string]$Distro = "",
+    [string]$LinuxRepoDir = "~/OpenGauss",
+    [string]$Branch = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-# ============================================================================
-# Configuration
-# ============================================================================
-
-$RepoUrlSsh = "git@github.com:morph-labs/gauss-agent.git"
-$RepoUrlHttps = "https://github.com/morph-labs/gauss-agent.git"
-$PythonVersion = "3.11"
-$NodeVersion = "22"
-
-# ============================================================================
-# Helper functions
-# ============================================================================
+$DefaultRepoUrl = "https://github.com/math-inc/OpenGauss.git"
+$script:ResolvedDistro = $null
 
 function Write-Banner {
     Write-Host ""
     Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Magenta
-    Write-Host "│                  ∑ Gauss Installer                     │" -ForegroundColor Magenta
+    Write-Host "│              Open Gauss WSL Installer                  │" -ForegroundColor Magenta
     Write-Host "├─────────────────────────────────────────────────────────┤" -ForegroundColor Magenta
-    Write-Host "│  Lean autoformalization workspace by Math Inc.          │" -ForegroundColor Magenta
+    Write-Host "│   Windows uses WSL2 and the shared installer flow      │" -ForegroundColor Magenta
     Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Magenta
+    Write-Host ""
+    Write-Host "[note] This install can take up to 10 minutes." -ForegroundColor Yellow
+    Write-Host "[note] For a setup in under 10 seconds, try: https://morph.new/opengauss" -ForegroundColor Yellow
     Write-Host ""
 }
 
 function Write-Info {
     param([string]$Message)
-    Write-Host "→ $Message" -ForegroundColor Cyan
+    Write-Host "-> $Message" -ForegroundColor Cyan
 }
 
 function Write-Success {
     param([string]$Message)
-    Write-Host "✓ $Message" -ForegroundColor Green
+    Write-Host "[ok] $Message" -ForegroundColor Green
 }
 
 function Write-Warn {
     param([string]$Message)
-    Write-Host "⚠ $Message" -ForegroundColor Yellow
+    Write-Host "[warn] $Message" -ForegroundColor Yellow
 }
 
 function Write-Err {
     param([string]$Message)
-    Write-Host "✗ $Message" -ForegroundColor Red
+    Write-Host "[err] $Message" -ForegroundColor Red
 }
 
-# ============================================================================
-# Dependency checks
-# ============================================================================
+function Resolve-Branch {
+    if ($Branch) {
+        return $Branch
+    }
 
-function Install-Uv {
-    Write-Info "Checking for uv package manager..."
-    
-    # Check if uv is already available
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        $version = uv --version
-        $script:UvCmd = "uv"
-        Write-Success "uv found ($version)"
-        return $true
-    }
-    
-    # Check common install locations
-    $uvPaths = @(
-        "$env:USERPROFILE\.local\bin\uv.exe",
-        "$env:USERPROFILE\.cargo\bin\uv.exe"
-    )
-    foreach ($uvPath in $uvPaths) {
-        if (Test-Path $uvPath) {
-            $script:UvCmd = $uvPath
-            $version = & $uvPath --version
-            Write-Success "uv found at $uvPath ($version)"
-            return $true
-        }
-    }
-    
-    # Install uv
-    Write-Info "Installing uv (fast Python package manager)..."
     try {
-        powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 2>&1 | Out-Null
-        
-        # Find the installed binary
-        $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
-        if (-not (Test-Path $uvExe)) {
-            $uvExe = "$env:USERPROFILE\.cargo\bin\uv.exe"
-        }
-        if (-not (Test-Path $uvExe)) {
-            # Refresh PATH and try again
-            $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-            if (Get-Command uv -ErrorAction SilentlyContinue) {
-                $uvExe = (Get-Command uv).Source
-            }
-        }
-        
-        if (Test-Path $uvExe) {
-            $script:UvCmd = $uvExe
-            $version = & $uvExe --version
-            Write-Success "uv installed ($version)"
-            return $true
-        }
-        
-        Write-Err "uv installed but not found on PATH"
-        Write-Info "Try restarting your terminal and re-running"
-        return $false
-    } catch {
-        Write-Err "Failed to install uv"
-        Write-Info "Install manually: https://docs.astral.sh/uv/getting-started/installation/"
-        return $false
-    }
-}
-
-function Test-Python {
-    Write-Info "Checking Python $PythonVersion..."
-    
-    # Let uv find or install Python
-    try {
-        $pythonPath = & $UvCmd python find $PythonVersion 2>$null
-        if ($pythonPath) {
-            $ver = & $pythonPath --version 2>$null
-            Write-Success "Python found: $ver"
-            return $true
-        }
-    } catch { }
-    
-    # Python not found — use uv to install it (no admin needed!)
-    Write-Info "Python $PythonVersion not found, installing via uv..."
-    try {
-        $uvOutput = & $UvCmd python install $PythonVersion 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $pythonPath = & $UvCmd python find $PythonVersion 2>$null
-            if ($pythonPath) {
-                $ver = & $pythonPath --version 2>$null
-                Write-Success "Python installed: $ver"
-                return $true
-            }
-        } else {
-            Write-Warn "uv python install output:"
-            Write-Host $uvOutput -ForegroundColor DarkGray
-        }
-    } catch {
-        Write-Warn "uv python install error: $_"
-    }
-
-    # Fallback: check if ANY Python 3.10+ is already available on the system
-    Write-Info "Trying to find any existing Python 3.10+..."
-    foreach ($fallbackVer in @("3.12", "3.13", "3.10")) {
-        try {
-            $pythonPath = & $UvCmd python find $fallbackVer 2>$null
-            if ($pythonPath) {
-                $ver = & $pythonPath --version 2>$null
-                Write-Success "Found fallback: $ver"
-                $script:PythonVersion = $fallbackVer
-                return $true
-            }
-        } catch { }
-    }
-
-    # Fallback: try system python
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        $sysVer = python --version 2>$null
-        if ($sysVer -match "3\.(1[0-9]|[1-9][0-9])") {
-            Write-Success "Using system Python: $sysVer"
-            return $true
-        }
-    }
-    
-    Write-Err "Failed to install Python $PythonVersion"
-    Write-Info "Install Python 3.11 manually, then re-run this script:"
-    Write-Info "  https://www.python.org/downloads/"
-    Write-Info "  Or: winget install Python.Python.3.11"
-    return $false
-}
-
-function Test-Git {
-    Write-Info "Checking Git..."
-    
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        $version = git --version
-        Write-Success "Git found ($version)"
-        return $true
-    }
-    
-    Write-Err "Git not found"
-    Write-Info "Please install Git from:"
-    Write-Info "  https://git-scm.com/download/win"
-    return $false
-}
-
-function Test-Node {
-    Write-Info "Checking Node.js (for browser tools)..."
-
-    if (Get-Command node -ErrorAction SilentlyContinue) {
-        $version = node --version
-        Write-Success "Node.js $version found"
-        $script:HasNode = $true
-        return $true
-    }
-
-    # Check our own managed install from a previous run
-    $managedNode = "$GaussHome\node\node.exe"
-    if (Test-Path $managedNode) {
-        $version = & $managedNode --version
-        $env:Path = "$GaussHome\node;$env:Path"
-        Write-Success "Node.js $version found (Gauss-managed)"
-        $script:HasNode = $true
-        return $true
-    }
-
-    Write-Info "Node.js not found — installing Node.js $NodeVersion LTS..."
-
-    # Try winget first (cleanest on modern Windows)
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Info "Installing via winget..."
-        try {
-            winget install OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-            # Refresh PATH
-            $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-            if (Get-Command node -ErrorAction SilentlyContinue) {
-                $version = node --version
-                Write-Success "Node.js $version installed via winget"
-                $script:HasNode = $true
-                return $true
-            }
-        } catch { }
-    }
-
-    # Fallback: download binary zip to the active Gauss home
-    Write-Info "Downloading Node.js $NodeVersion binary..."
-    try {
-        $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
-        $indexUrl = "https://nodejs.org/dist/latest-v${NodeVersion}.x/"
-        $indexPage = Invoke-WebRequest -Uri $indexUrl -UseBasicParsing
-        $zipName = ($indexPage.Content | Select-String -Pattern "node-v${NodeVersion}\.\d+\.\d+-win-${arch}\.zip" -AllMatches).Matches[0].Value
-
-        if ($zipName) {
-            $downloadUrl = "${indexUrl}${zipName}"
-            $tmpZip = "$env:TEMP\$zipName"
-            $tmpDir = "$env:TEMP\gauss-node-extract"
-
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpZip -UseBasicParsing
-            if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
-            Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
-
-            $extractedDir = Get-ChildItem $tmpDir -Directory | Select-Object -First 1
-            if ($extractedDir) {
-                if (Test-Path "$GaussHome\node") { Remove-Item -Recurse -Force "$GaussHome\node" }
-                Move-Item $extractedDir.FullName "$GaussHome\node"
-                $env:Path = "$GaussHome\node;$env:Path"
-
-                $version = & "$GaussHome\node\node.exe" --version
-                Write-Success "Node.js $version installed to ${GaussHome}\node"
-                $script:HasNode = $true
-
-                Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue
-                Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
-                return $true
+        $current = git rev-parse --abbrev-ref HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $current) {
+            $trimmed = $current.Trim()
+            if ($trimmed -and $trimmed -ne "HEAD") {
+                return $trimmed
             }
         }
     } catch {
-        Write-Warn "Download failed: $_"
     }
 
-    Write-Warn "Could not auto-install Node.js"
-    Write-Info "Install manually: https://nodejs.org/en/download/"
-    $script:HasNode = $false
-    return $true
+    return "main"
 }
 
-function Install-SystemPackages {
-    $script:HasRipgrep = $false
-    $script:HasFfmpeg = $false
-    $needRipgrep = $false
-    $needFfmpeg = $false
-
-    Write-Info "Checking ripgrep (fast file search)..."
-    if (Get-Command rg -ErrorAction SilentlyContinue) {
-        $version = rg --version | Select-Object -First 1
-        Write-Success "$version found"
-        $script:HasRipgrep = $true
-    } else {
-        $needRipgrep = $true
+function Get-RerunCommand {
+    $parts = @(".\scripts\install.ps1")
+    if ($WithWorkspace) {
+        $parts += "-WithWorkspace"
     }
-
-    Write-Info "Checking ffmpeg (TTS voice messages)..."
-    if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
-        Write-Success "ffmpeg found"
-        $script:HasFfmpeg = $true
-    } else {
-        $needFfmpeg = $true
+    if ($Distro) {
+        $parts += "-Distro"
+        $parts += "`"$Distro`""
     }
-
-    if (-not $needRipgrep -and -not $needFfmpeg) { return }
-
-    # Build description and package lists for each package manager
-    $descParts = @()
-    $wingetPkgs = @()
-    $chocoPkgs = @()
-    $scoopPkgs = @()
-
-    if ($needRipgrep) {
-        $descParts += "ripgrep for faster file search"
-        $wingetPkgs += "BurntSushi.ripgrep.MSVC"
-        $chocoPkgs += "ripgrep"
-        $scoopPkgs += "ripgrep"
+    if ($LinuxRepoDir -and $LinuxRepoDir -ne "~/OpenGauss") {
+        $parts += "-LinuxRepoDir"
+        $parts += "`"$LinuxRepoDir`""
     }
-    if ($needFfmpeg) {
-        $descParts += "ffmpeg for TTS voice messages"
-        $wingetPkgs += "Gyan.FFmpeg"
-        $chocoPkgs += "ffmpeg"
-        $scoopPkgs += "ffmpeg"
+    if ($Branch) {
+        $parts += "-Branch"
+        $parts += "`"$Branch`""
     }
-
-    $description = $descParts -join " and "
-    $hasWinget = Get-Command winget -ErrorAction SilentlyContinue
-    $hasChoco = Get-Command choco -ErrorAction SilentlyContinue
-    $hasScoop = Get-Command scoop -ErrorAction SilentlyContinue
-
-    # Try winget first (most common on modern Windows)
-    if ($hasWinget) {
-        Write-Info "Installing $description via winget..."
-        foreach ($pkg in $wingetPkgs) {
-            try {
-                winget install $pkg --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-            } catch { }
-        }
-        # Refresh PATH and recheck
-        $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-        if ($needRipgrep -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-            Write-Success "ripgrep installed"
-            $script:HasRipgrep = $true
-            $needRipgrep = $false
-        }
-        if ($needFfmpeg -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            Write-Success "ffmpeg installed"
-            $script:HasFfmpeg = $true
-            $needFfmpeg = $false
-        }
-        if (-not $needRipgrep -and -not $needFfmpeg) { return }
-    }
-
-    # Fallback: choco
-    if ($hasChoco -and ($needRipgrep -or $needFfmpeg)) {
-        Write-Info "Trying Chocolatey..."
-        foreach ($pkg in $chocoPkgs) {
-            try { choco install $pkg -y 2>&1 | Out-Null } catch { }
-        }
-        if ($needRipgrep -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-            Write-Success "ripgrep installed via chocolatey"
-            $script:HasRipgrep = $true
-            $needRipgrep = $false
-        }
-        if ($needFfmpeg -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            Write-Success "ffmpeg installed via chocolatey"
-            $script:HasFfmpeg = $true
-            $needFfmpeg = $false
-        }
-    }
-
-    # Fallback: scoop
-    if ($hasScoop -and ($needRipgrep -or $needFfmpeg)) {
-        Write-Info "Trying Scoop..."
-        foreach ($pkg in $scoopPkgs) {
-            try { scoop install $pkg 2>&1 | Out-Null } catch { }
-        }
-        if ($needRipgrep -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-            Write-Success "ripgrep installed via scoop"
-            $script:HasRipgrep = $true
-            $needRipgrep = $false
-        }
-        if ($needFfmpeg -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            Write-Success "ffmpeg installed via scoop"
-            $script:HasFfmpeg = $true
-            $needFfmpeg = $false
-        }
-    }
-
-    # Show manual instructions for anything still missing
-    if ($needRipgrep) {
-        Write-Warn "ripgrep not installed (file search will use findstr fallback)"
-        Write-Info "  winget install BurntSushi.ripgrep.MSVC"
-    }
-    if ($needFfmpeg) {
-        Write-Warn "ffmpeg not installed (TTS voice messages will be limited)"
-        Write-Info "  winget install Gyan.FFmpeg"
-    }
+    return ($parts -join " ")
 }
 
-# ============================================================================
-# Installation
-# ============================================================================
+function Install-WSLDistro {
+    param([string]$TargetDistro)
 
-function Install-Repository {
-    Write-Info "Installing to $InstallDir..."
-    
-    if (Test-Path $InstallDir) {
-        if (Test-Path "$InstallDir\.git") {
-            Write-Info "Existing installation found, updating..."
-            Push-Location $InstallDir
-            git -c windows.appendAtomically=false fetch origin
-            git -c windows.appendAtomically=false checkout $Branch
-            git -c windows.appendAtomically=false pull origin $Branch
-            Pop-Location
-        } else {
-            Write-Err "Directory exists but is not a git repository: $InstallDir"
-            Write-Info "Remove it or choose a different directory with -InstallDir"
-            throw "Directory exists but is not a git repository: $InstallDir"
-        }
-    } else {
-        $cloneSuccess = $false
+    $rerunCommand = Get-RerunCommand
 
-        # Fix Windows git "copy-fd: write returned: Invalid argument" error.
-        # Git for Windows can fail on atomic file operations (hook templates,
-        # config lock files) due to antivirus, OneDrive, or NTFS filter drivers.
-        # The -c flag injects config before any file I/O occurs.
-        Write-Info "Configuring git for Windows compatibility..."
-        $env:GIT_CONFIG_COUNT = "1"
-        $env:GIT_CONFIG_KEY_0 = "windows.appendAtomically"
-        $env:GIT_CONFIG_VALUE_0 = "false"
-        git config --global windows.appendAtomically false 2>$null
+    Write-Warn "No initialized WSL distro is available yet."
+    Write-Info "Installing the WSL distro '$TargetDistro' now."
+    Write-Warn "Windows may prompt for elevation, enable WSL features, or require a restart."
+    Write-Warn "If WSL drops you into the new Linux shell, type 'exit' to return here, then rerun:"
+    Write-Host "  $rerunCommand" -ForegroundColor Yellow
 
-        # Try SSH first, then HTTPS, with -c flag for atomic write fix
-        Write-Info "Trying SSH clone..."
-        $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=5"
-        try {
-            git -c windows.appendAtomically=false clone --branch $Branch --recurse-submodules $RepoUrlSsh $InstallDir
-            if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
-        } catch { }
-        $env:GIT_SSH_COMMAND = $null
-        
-        if (-not $cloneSuccess) {
-            if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
-            Write-Info "SSH failed, trying HTTPS..."
-            try {
-                git -c windows.appendAtomically=false clone --branch $Branch --recurse-submodules $RepoUrlHttps $InstallDir
-                if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
-            } catch { }
-        }
-
-        # Fallback: download ZIP archive (bypasses git file I/O issues entirely)
-        if (-not $cloneSuccess) {
-            if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
-            Write-Warn "Git clone failed — downloading ZIP archive instead..."
-            try {
-                $zipUrl = "https://github.com/NousResearch/gauss-agent/archive/refs/heads/$Branch.zip"
-                $zipPath = "$env:TEMP\gauss-agent-$Branch.zip"
-                $extractPath = "$env:TEMP\gauss-agent-extract"
-                
-                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
-                if (Test-Path $extractPath) { Remove-Item -Recurse -Force $extractPath }
-                Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-                
-                # GitHub ZIPs extract to repo-branch/ subdirectory
-                $extractedDir = Get-ChildItem $extractPath -Directory | Select-Object -First 1
-                if ($extractedDir) {
-                    New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir) -ErrorAction SilentlyContinue | Out-Null
-                    Move-Item $extractedDir.FullName $InstallDir -Force
-                    Write-Success "Downloaded and extracted"
-                    
-                    # Initialize git repo so updates work later
-                    Push-Location $InstallDir
-                    git -c windows.appendAtomically=false init 2>$null
-                    git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
-                    git remote add origin $RepoUrlHttps 2>$null
-                    Pop-Location
-                    Write-Success "Git repo initialized for future updates"
-                    
-                    $cloneSuccess = $true
-                }
-                
-                # Cleanup temp files
-                Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
-                Remove-Item -Recurse -Force $extractPath -ErrorAction SilentlyContinue
-            } catch {
-                Write-Err "ZIP download also failed: $_"
-            }
-        }
-
-        if (-not $cloneSuccess) {
-            throw "Failed to download repository (tried git clone SSH, HTTPS, and ZIP)"
-        }
-    }
-    
-    # Set per-repo config (harmless if it fails)
-    Push-Location $InstallDir
-    git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
-
-    # Ensure submodules are initialized and updated
-    Write-Info "Initializing submodules (mini-swe-agent, tinker-atropos)..."
-    git -c windows.appendAtomically=false submodule update --init --recursive 2>$null
+    & wsl.exe --install -d $TargetDistro
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Submodule init failed (terminal/RL tools may need manual setup)"
-    } else {
-        Write-Success "Submodules ready"
+        throw "WSL distro install failed with code $LASTEXITCODE"
     }
-    Pop-Location
-    
-    Write-Success "Repository ready"
+
+    Write-Host ""
+    Write-Warn "WSL reported a successful install command."
+    Write-Warn "If the distro setup opened a Linux shell, type 'exit' there to return to PowerShell."
+    Write-Warn "If Windows asks you to restart or finish distro setup, do that first and then rerun:"
+    Write-Host "  $rerunCommand" -ForegroundColor Yellow
 }
 
-function Install-Venv {
-    if ($NoVenv) {
-        Write-Info "Skipping virtual environment (-NoVenv)"
+function Get-InstalledWSLDistros {
+    $listOutput = & wsl.exe --list --quiet 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return @()
+    }
+
+    $distros = @()
+    foreach ($line in ($listOutput | Out-String).Split("`n")) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) {
+            continue
+        }
+        $cleaned = ($trimmed -replace "`0", "").Trim()
+        if ($cleaned) {
+            $distros += $cleaned
+        }
+    }
+    return $distros
+}
+
+function Test-WSLBash {
+    param([string]$TargetDistro)
+
+    $probeArgs = @()
+    if ($TargetDistro) {
+        $probeArgs += @("-d", $TargetDistro)
+    }
+    $probeArgs += @("--", "bash", "-lc", "printf ok")
+
+    $probeOutput = & wsl.exe @probeArgs 2>$null
+    $probeText = ($probeOutput | Out-String).Trim()
+    return ($LASTEXITCODE -eq 0 -and $probeText -eq "ok")
+}
+
+function Ensure-WSL {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        Write-Err "WSL is not installed on this machine."
+        Write-Info "Install it with:"
+        Write-Host "  wsl --install -d Ubuntu" -ForegroundColor Yellow
+        throw "WSL is required"
+    }
+
+    if ($Distro) {
+        $installedDistros = Get-InstalledWSLDistros
+        if ($installedDistros -notcontains $Distro) {
+            Install-WSLDistro -TargetDistro $Distro
+        }
+        if (-not (Test-WSLBash -TargetDistro $Distro)) {
+            Write-Err "Could not start the WSL distro '$Distro'."
+            Write-Info "Open that distro once to finish first-run setup, then rerun this installer."
+            throw "WSL shell unavailable"
+        }
+        $script:ResolvedDistro = $Distro
         return
     }
-    
-    Write-Info "Creating virtual environment with Python $PythonVersion..."
-    
-    Push-Location $InstallDir
-    
-    if (Test-Path "venv") {
-        Write-Info "Virtual environment already exists, recreating..."
-        Remove-Item -Recurse -Force "venv"
-    }
-    
-    # uv creates the venv and pins the Python version in one step
-    & $UvCmd venv venv --python $PythonVersion
-    
-    Pop-Location
-    
-    Write-Success "Virtual environment ready (Python $PythonVersion)"
-}
 
-function Install-Dependencies {
-    Write-Info "Installing dependencies..."
-    
-    Push-Location $InstallDir
-    
-    if (-not $NoVenv) {
-        # Tell uv to install into our venv (no activation needed)
-        $env:VIRTUAL_ENV = "$InstallDir\venv"
-    }
-    
-    # Install main package with all extras
-    try {
-        & $UvCmd pip install -e ".[all]" 2>&1 | Out-Null
-    } catch {
-        & $UvCmd pip install -e "." | Out-Null
-    }
-    
-    Write-Success "Main package installed"
-    
-    # Install submodules
-    Write-Info "Installing mini-swe-agent (terminal tool backend)..."
-    if (Test-Path "mini-swe-agent\pyproject.toml") {
-        try {
-            & $UvCmd pip install -e ".\mini-swe-agent" 2>&1 | Out-Null
-            Write-Success "mini-swe-agent installed"
-        } catch {
-            Write-Warn "mini-swe-agent install failed (terminal tools may not work)"
-        }
-    } else {
-        Write-Warn "mini-swe-agent not found (run: git submodule update --init)"
-    }
-    
-    Write-Info "Installing tinker-atropos (RL training backend)..."
-    if (Test-Path "tinker-atropos\pyproject.toml") {
-        try {
-            & $UvCmd pip install -e ".\tinker-atropos" 2>&1 | Out-Null
-            Write-Success "tinker-atropos installed"
-        } catch {
-            Write-Warn "tinker-atropos install failed (RL tools may not work)"
-        }
-    } else {
-        Write-Warn "tinker-atropos not found (run: git submodule update --init)"
-    }
-    
-    Pop-Location
-    
-    Write-Success "All dependencies installed"
-}
-
-function Set-PathVariable {
-    Write-Info "Setting up gauss command..."
-    
-    if ($NoVenv) {
-        $gaussBin = "$InstallDir"
-    } else {
-        $gaussBin = "$InstallDir\venv\Scripts"
-    }
-    
-    # Add the venv Scripts dir to user PATH so gauss is globally available
-    # On Windows, the gauss.exe in venv\Scripts\ has the venv Python baked in
-    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    
-    if ($currentPath -notlike "*$gaussBin*") {
-        [Environment]::SetEnvironmentVariable(
-            "Path",
-            "$gaussBin;$currentPath",
-            "User"
-        )
-        Write-Success "Added to user PATH: $gaussBin"
-    } else {
-        Write-Info "PATH already configured"
-    }
-    
-    # Set GAUSS_HOME so the Python code finds config/data in the right place.
-    # Only needed on Windows where we install to %LOCALAPPDATA%\gauss instead
-    # of the Unix default ~/.gauss
-    $currentGaussHome = [Environment]::GetEnvironmentVariable("GAUSS_HOME", "User")
-    if (-not $currentGaussHome -or $currentGaussHome -ne $GaussHome) {
-        [Environment]::SetEnvironmentVariable("GAUSS_HOME", $GaussHome, "User")
-        Write-Success "Set GAUSS_HOME=$GaussHome"
-    }
-    $env:GAUSS_HOME = $GaussHome
-    
-    # Update current session
-    $env:Path = "$gaussBin;$env:Path"
-    
-    [Environment]::SetEnvironmentVariable("GAUSS_HOME", $GaussHome, "User")
-    $env:GAUSS_HOME = $GaussHome
-    Write-Success "gauss command ready (legacy alias: gauss)"
-}
-
-function Copy-ConfigTemplates {
-    Write-Info "Setting up configuration files..."
-    
-    # Create ~/.gauss directory structure
-    New-Item -ItemType Directory -Force -Path "$GaussHome\cron" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\sessions" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\logs" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\pairing" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\hooks" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\image_cache" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\audio_cache" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\memories" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\skills" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$GaussHome\whatsapp\session" | Out-Null
-    
-    # Create .env
-    $envPath = "$GaussHome\.env"
-    if (-not (Test-Path $envPath)) {
-        $examplePath = "$InstallDir\.env.example"
-        if (Test-Path $examplePath) {
-            Copy-Item $examplePath $envPath
-            Write-Success "Created ~/.gauss/.env from template"
-        } else {
-            New-Item -ItemType File -Force -Path $envPath | Out-Null
-            Write-Success "Created ~/.gauss/.env"
-        }
-    } else {
-        Write-Info "~/.gauss/.env already exists, keeping it"
-    }
-    
-    # Create config.yaml
-    $configPath = "$GaussHome\config.yaml"
-    if (-not (Test-Path $configPath)) {
-        $examplePath = "$InstallDir\cli-config.yaml.example"
-        if (Test-Path $examplePath) {
-            Copy-Item $examplePath $configPath
-            Write-Success "Created ~/.gauss/config.yaml from template"
-        }
-    } else {
-        Write-Info "~/.gauss/config.yaml already exists, keeping it"
-    }
-    
-    # Create SOUL.md if it doesn't exist (global persona file)
-    $soulPath = "$GaussHome\SOUL.md"
-    if (-not (Test-Path $soulPath)) {
-        @"
-# Gauss Persona
-
-<!-- 
-This file defines the agent's personality and tone.
-The agent will embody whatever you write here.
-Edit this to customize how Gauss communicates with you.
-
-Examples:
-  - "You are a warm, playful assistant who uses kaomoji occasionally."
-  - "You are a concise technical expert. No fluff, just facts."
-  - "You speak like a friendly coworker who happens to know everything."
-
-This file is loaded fresh each message -- no restart needed.
-Delete the contents (or this file) to use the default personality.
--->
-"@ | Set-Content -Path $soulPath -Encoding UTF8
-        Write-Success "Created ~/.gauss/SOUL.md (edit to customize personality)"
-    }
-    
-    Write-Success "Configuration directory ready: ~/.gauss/"
-    Write-Info "Bundled skills are not installed by default in Gauss."
-}
-
-function Install-NodeDeps {
-    if (-not $HasNode) {
-        Write-Info "Skipping Node.js dependencies (Node not installed)"
+    if (Test-WSLBash -TargetDistro "") {
+        $script:ResolvedDistro = $null
         return
     }
-    
-    Push-Location $InstallDir
-    
-    if (Test-Path "package.json") {
-        Write-Info "Installing Node.js dependencies (browser tools)..."
-        try {
-            npm install --silent 2>&1 | Out-Null
-            Write-Success "Node.js dependencies installed"
-        } catch {
-            Write-Warn "npm install failed (browser tools may not work)"
-        }
-    }
-    
-    # Install WhatsApp bridge dependencies
-    $bridgeDir = "$InstallDir\scripts\whatsapp-bridge"
-    if (Test-Path "$bridgeDir\package.json") {
-        Write-Info "Installing WhatsApp bridge dependencies..."
-        Push-Location $bridgeDir
-        try {
-            npm install --silent 2>&1 | Out-Null
-            Write-Success "WhatsApp bridge dependencies installed"
-        } catch {
-            Write-Warn "WhatsApp bridge npm install failed (WhatsApp may not work)"
-        }
-        Pop-Location
-    }
-    
-    Pop-Location
-}
 
-function Invoke-SetupWizard {
-    if ($SkipSetup) {
-        Write-Info "Skipping setup wizard (-SkipSetup)"
+    $installedDistros = Get-InstalledWSLDistros
+    if ($installedDistros.Count -gt 0) {
+        $preferredDistro = if ($installedDistros -contains "Ubuntu") { "Ubuntu" } else { $installedDistros[0] }
+        Write-Info "Found existing WSL distro: $preferredDistro"
+        if (-not (Test-WSLBash -TargetDistro $preferredDistro)) {
+            Write-Err "Could not start the existing WSL distro '$preferredDistro'."
+            Write-Info "Open that distro once to finish first-run setup, then rerun this installer."
+            throw "WSL shell unavailable"
+        }
+        $script:ResolvedDistro = $preferredDistro
         return
     }
-    
-    Write-Host ""
-    Write-Info "Starting setup wizard..."
-    Write-Host ""
-    
-    Push-Location $InstallDir
-    
-    # Run gauss setup using the venv Python directly (no activation needed)
-    if (-not $NoVenv) {
-        & ".\venv\Scripts\python.exe" -m gauss_cli.main setup
-    } else {
-        python -m gauss_cli.main setup
+
+    Install-WSLDistro -TargetDistro "Ubuntu"
+
+    if (-not (Test-WSLBash -TargetDistro "Ubuntu")) {
+        Write-Err "Could not start a WSL bash shell after installing 'Ubuntu'."
+        Write-Info "Finish any Windows restart or first-run distro setup, then rerun this installer."
+        throw "WSL shell unavailable"
     }
-    
-    Pop-Location
+
+    $script:ResolvedDistro = "Ubuntu"
 }
 
-function Start-GatewayIfConfigured {
-    $envPath = "$GaussHome\.env"
-    if (-not (Test-Path $envPath)) { return }
+function Build-InstallScript {
+    return @'
+set -euo pipefail
 
-    $hasMessaging = $false
-    $content = Get-Content $envPath -ErrorAction SilentlyContinue
-    foreach ($var in @("TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "WHATSAPP_ENABLED")) {
-        $match = $content | Where-Object { $_ -match "^${var}=.+" -and $_ -notmatch "your-token-here" }
-        if ($match) { $hasMessaging = $true; break }
-    }
+REPO_URL="${1:?missing REPO_URL}"
+REQUESTED_BRANCH="${2:?missing REQUESTED_BRANCH}"
+TARGET_DIR_RAW="${3:?missing TARGET_DIR_RAW}"
+CREATE_WORKSPACE="${4:?missing CREATE_WORKSPACE}"
 
-    if (-not $hasMessaging) { return }
+case "$TARGET_DIR_RAW" in
+  "~")
+    TARGET_DIR="$HOME"
+    ;;
+  "~/"*)
+    TARGET_DIR="$HOME/${TARGET_DIR_RAW#~/}"
+    ;;
+  *)
+    TARGET_DIR="$TARGET_DIR_RAW"
+    ;;
+esac
 
-    $gaussCmd = "$InstallDir\venv\Scripts\gauss.exe"
-    if (-not (Test-Path $gaussCmd)) {
-        $gaussCmd = "gauss"
-    }
+if ! command -v git >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt-get update
+    sudo apt-get install -y git
+  else
+    echo "✗ git is required inside WSL before Open Gauss can be installed."
+    exit 1
+  fi
+fi
 
-    # If WhatsApp is enabled but not yet paired, run foreground for QR scan
-    $whatsappEnabled = $content | Where-Object { $_ -match "^WHATSAPP_ENABLED=true" }
-    $whatsappSession = "$GaussHome\whatsapp\session\creds.json"
-    if ($whatsappEnabled -and -not (Test-Path $whatsappSession)) {
-        Write-Host ""
-        Write-Info "WhatsApp is enabled but not yet paired."
-        Write-Info "Running 'gauss whatsapp' to pair via QR code..."
-        Write-Host ""
-        $response = Read-Host "Pair WhatsApp now? [Y/n]"
-        if ($response -eq "" -or $response -match "^[Yy]") {
-            try {
-                & $gaussCmd whatsapp
-            } catch {
-                # Expected after pairing completes
-            }
-        }
-    }
+CHOSEN_BRANCH="$REQUESTED_BRANCH"
+if ! git ls-remote --exit-code --heads "$REPO_URL" "$REQUESTED_BRANCH" >/dev/null 2>&1; then
+  if [ "$REQUESTED_BRANCH" != "main" ]; then
+    echo "→ Branch $REQUESTED_BRANCH is not published on origin; falling back to main."
+  fi
+  CHOSEN_BRANCH="main"
+fi
 
-    Write-Host ""
-    Write-Info "Messaging platform token detected!"
-    Write-Info "The gateway handles messaging platforms and cron job execution."
-    Write-Host ""
-    $response = Read-Host "Would you like to start the gateway now? [Y/n]"
+mkdir -p "$(dirname "$TARGET_DIR")"
 
-    if ($response -eq "" -or $response -match "^[Yy]") {
-        Write-Info "Starting gateway in background..."
-        try {
-            $logFile = "$GaussHome\logs\gateway.log"
-            Start-Process -FilePath $gaussCmd -ArgumentList "gateway" `
-                -RedirectStandardOutput $logFile `
-                -RedirectStandardError "$GaussHome\logs\gateway-error.log" `
-                -WindowStyle Hidden
-            Write-Success "Gateway started! Your bot is now online."
-            Write-Info "Logs: $logFile"
-            Write-Info "To stop: close the gateway process from Task Manager"
-        } catch {
-            Write-Warn "Failed to start gateway. Run manually: gauss gateway"
-        }
-    } else {
-        Write-Info "Skipped. Start the gateway later with: gauss gateway"
-    }
+if [ -d "$TARGET_DIR/.git" ]; then
+  if [ -n "$(git -C "$TARGET_DIR" status --porcelain 2>/dev/null)" ]; then
+    echo "✗ Existing WSL checkout at $TARGET_DIR has local changes."
+    echo "  Commit or stash them, then rerun this installer."
+    exit 1
+  fi
+  git -C "$TARGET_DIR" remote set-url origin "$REPO_URL" || true
+  git -C "$TARGET_DIR" fetch origin "$CHOSEN_BRANCH" --tags
+  if git -C "$TARGET_DIR" show-ref --verify --quiet "refs/heads/$CHOSEN_BRANCH"; then
+    git -C "$TARGET_DIR" switch "$CHOSEN_BRANCH"
+  else
+    git -C "$TARGET_DIR" switch -c "$CHOSEN_BRANCH" --track "origin/$CHOSEN_BRANCH"
+  fi
+  git -C "$TARGET_DIR" pull --ff-only origin "$CHOSEN_BRANCH"
+  git -C "$TARGET_DIR" submodule update --init --recursive
+else
+  git clone --branch "$CHOSEN_BRANCH" --recurse-submodules "$REPO_URL" "$TARGET_DIR"
+fi
+
+cd "$TARGET_DIR"
+if [ "$CREATE_WORKSPACE" = "1" ]; then
+  echo "→ -WithWorkspace is accepted for compatibility."
+  echo "→ The shared Open Gauss template already provisions the workspace."
+fi
+./scripts/install.sh
+'@
 }
 
-function Write-Completion {
-    Write-Host ""
-    Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Green
-    Write-Host "│              ✓ Installation Complete!                   │" -ForegroundColor Green
-    Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Green
-    Write-Host ""
-    
-    # Show file locations
-    Write-Host "📁 Your files:" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "   Config:    " -NoNewline -ForegroundColor Yellow
-    Write-Host "$GaussHome\config.yaml"
-    Write-Host "   API Keys:  " -NoNewline -ForegroundColor Yellow
-    Write-Host "$GaussHome\.env"
-    Write-Host "   Data:      " -NoNewline -ForegroundColor Yellow
-    Write-Host "$GaussHome\cron\, sessions\, logs\"
-    Write-Host "   Code:      " -NoNewline -ForegroundColor Yellow
-    Write-Host "$GaussHome\gauss-agent\"
-    Write-Host ""
-    
-    Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "🚀 Commands:" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "   gauss               " -NoNewline -ForegroundColor Green
-    Write-Host "Start chatting"
-    Write-Host "   gauss setup         " -NoNewline -ForegroundColor Green
-    Write-Host "Configure API keys & settings"
-    Write-Host "   gauss config        " -NoNewline -ForegroundColor Green
-    Write-Host "View/edit configuration"
-    Write-Host "   /autoformalize      " -NoNewline -ForegroundColor Green
-    Write-Host "Launch the managed Lean workflow inside Gauss"
-    Write-Host "   gauss update        " -NoNewline -ForegroundColor Green
-    Write-Host "Update to latest version"
-    Write-Host ""
-    
-    Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "⚡ Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
-    Write-Host ""
-    
-    if (-not $HasNode) {
-        Write-Host "Note: Node.js could not be installed automatically." -ForegroundColor Yellow
-        Write-Host "Browser tools need Node.js. Install manually:" -ForegroundColor Yellow
-        Write-Host "  https://nodejs.org/en/download/" -ForegroundColor Yellow
-        Write-Host ""
-    }
-    
-    if (-not $HasRipgrep) {
-        Write-Host "Note: ripgrep (rg) was not installed. For faster file search:" -ForegroundColor Yellow
-        Write-Host "  winget install BurntSushi.ripgrep.MSVC" -ForegroundColor Yellow
-        Write-Host ""
-    }
-}
+function Resolve-WSLPath {
+    param([string]$WindowsPath)
 
-# ============================================================================
-# Main
-# ============================================================================
+    $normalizedPath = $WindowsPath -replace '\\', '/'
+
+    $pathArgs = @()
+    if ($script:ResolvedDistro) {
+        $pathArgs += @("-d", $script:ResolvedDistro)
+    }
+    $pathArgs += @("--", "wslpath", "-u", "-a", $normalizedPath)
+
+    $wslPath = (& wsl.exe @pathArgs | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $wslPath) {
+        throw "Could not translate Windows path into a WSL path: $WindowsPath"
+    }
+    return $wslPath
+}
 
 function Main {
     Write-Banner
-    
-    if (-not (Install-Uv)) { throw "uv installation failed — cannot continue" }
-    if (-not (Test-Python)) { throw "Python $PythonVersion not available — cannot continue" }
-    if (-not (Test-Git)) { throw "Git not found — install from https://git-scm.com/download/win" }
-    Test-Node              # Auto-installs if missing
-    Install-SystemPackages  # ripgrep + ffmpeg in one step
-    
-    Install-Repository
-    Install-Venv
-    Install-Dependencies
-    Install-NodeDeps
-    Set-PathVariable
-    Copy-ConfigTemplates
-    Invoke-SetupWizard
-    Start-GatewayIfConfigured
-    
-    Write-Completion
+    Write-Info "Open Gauss on Windows runs through WSL2."
+    Write-Info "This bootstrap clones into your WSL home and then runs ./scripts/install.sh there."
+    Ensure-WSL
+
+    $resolvedBranch = Resolve-Branch
+    Write-Info "Using repository branch: $resolvedBranch"
+    if ($script:ResolvedDistro) {
+        Write-Info "Using WSL distro: $script:ResolvedDistro"
+    } else {
+        Write-Info "Using your default WSL distro"
+    }
+    Write-Info "Using WSL repo path: $LinuxRepoDir"
+
+    $bashScript = (Build-InstallScript).Replace("`r`n", "`n").Replace("`r", "`n")
+    $workspaceFlag = if ($WithWorkspace.IsPresent) { "1" } else { "0" }
+    $tempDir = Join-Path $env:TEMP "opengauss-wsl-bootstrap"
+    $tempScriptPath = Join-Path $tempDir "install.sh"
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+    [System.IO.File]::WriteAllText(
+        $tempScriptPath,
+        $bashScript,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+
+    try {
+        $wslScriptPath = Resolve-WSLPath -WindowsPath $tempScriptPath
+
+        $wslArgs = @()
+        if ($script:ResolvedDistro) {
+            $wslArgs += @("-d", $script:ResolvedDistro)
+        }
+        $wslArgs += @(
+            "--",
+            "bash",
+            $wslScriptPath,
+            $DefaultRepoUrl,
+            $resolvedBranch,
+            $LinuxRepoDir,
+            $workspaceFlag
+        )
+
+        & wsl.exe @wslArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "WSL install flow exited with code $LASTEXITCODE"
+        }
+    } finally {
+        Remove-Item -Force $tempScriptPath -ErrorAction SilentlyContinue
+    }
+
+    Write-Host ""
+    Write-Success "Open Gauss is installed in WSL."
+    Write-Info "For daily use, open your WSL shell and run:"
+    Write-Host "  cd $LinuxRepoDir" -ForegroundColor Yellow
+    Write-Host "  gauss" -ForegroundColor Yellow
+    Write-Host ""
 }
 
-# Wrap in try/catch so errors don't kill the terminal when run via:
-#   irm https://...install.ps1 | iex
-# (exit/throw inside iex kills the entire PowerShell session)
 try {
     Main
 } catch {
     Write-Host ""
-    Write-Err "Installation failed: $_"
+    Write-Err "$_"
     Write-Host ""
-    Write-Info "If the error is unclear, try downloading and running the script directly:"
-    Write-Host "  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/morph-labs/gauss-agent/main/scripts/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
-    Write-Host "  .\install.ps1" -ForegroundColor Yellow
-    Write-Host ""
+    exit 1
 }

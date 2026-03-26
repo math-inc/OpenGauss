@@ -5,6 +5,7 @@ REPO_ROOT="${REPO_ROOT:-/src}"
 GAUSS_HOME="${GAUSS_HOME:-/root/.gauss}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-/root/GaussWorkspaceSmoke}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-dummy-installer-key}"
+INITIAL_OPENAI_API_KEY="$OPENAI_API_KEY"
 
 die() {
     printf 'ERROR: %s\n' "$1" >&2
@@ -21,7 +22,7 @@ assert_command() {
     command -v "$cmd" >/dev/null 2>&1 || die "expected command on PATH: $cmd"
 }
 
-if [[ ! -f "$REPO_ROOT/scripts/install.sh" ]]; then
+if [[ ! -f "$REPO_ROOT/scripts/install-internal.sh" ]]; then
     die "installer script not found under $REPO_ROOT"
 fi
 
@@ -41,7 +42,7 @@ case ":$PATH:" in
         ;;
 esac
 export OPENAI_API_KEY
-./scripts/install.sh \
+./scripts/install-internal.sh \
     --gauss-home "$GAUSS_HOME" \
     --workspace-dir "$WORKSPACE_DIR" \
     --with-workspace \
@@ -54,7 +55,7 @@ grep -F "$HOME/.local/bin/gauss" "$INSTALL_LOG" >/dev/null || die "expected inst
 grep -F "Start Options:" "$INSTALL_LOG" >/dev/null || die "expected installer summary to list post-install start options"
 grep -F "gauss-open-session" "$INSTALL_LOG" >/dev/null || die "expected installer summary to mention gauss-open-session"
 grep -F "gauss-open-guide" "$INSTALL_LOG" >/dev/null || die "expected installer summary to mention gauss-open-guide"
-grep -F "cannot change PATH in the shell that launched ./scripts/install.sh" "$INSTALL_LOG" >/dev/null || die "expected installer summary to explain current-shell PATH behavior"
+grep -F "cannot change PATH in the shell that launched the installer." "$INSTALL_LOG" >/dev/null || die "expected installer summary to explain current-shell PATH behavior"
 grep -F "Managed /prove staging verified:" "$INSTALL_LOG" >/dev/null || die "expected installer to verify managed /prove staging in the Lean workspace"
 if grep -F "Skipping managed /prove staging verification" "$INSTALL_LOG" >/dev/null; then
     die "expected installer managed /prove verification to run in the Lean workspace"
@@ -92,7 +93,7 @@ INSTALL_ROOT_VALUE="$(cat "$GAUSS_HOME/install-root")"
 [[ "$INSTALL_ROOT_VALUE" == "$REPO_ROOT" ]] || die "install-root mismatch: $INSTALL_ROOT_VALUE"
 
 echo "==> Verifying config defaults and staged provider state"
-python3 - "$GAUSS_HOME" "$WORKSPACE_DIR" "$OPENAI_API_KEY" <<'PY'
+python3 - "$GAUSS_HOME" "$WORKSPACE_DIR" "$INITIAL_OPENAI_API_KEY" <<'PY'
 from pathlib import Path
 import sys
 import yaml
@@ -126,14 +127,14 @@ echo "==> Verifying rerun idempotence and staged-key preservation"
 printf '\nSMOKE_RERUN_MARKER\n' >> "$WORKSPACE_DIR/PAPER.md"
 touch "$WORKSPACE_DIR/KEEP_ME.txt"
 unset OPENAI_API_KEY OPENROUTER_API_KEY ANTHROPIC_API_KEY
-./scripts/install.sh \
+./scripts/install-internal.sh \
     --gauss-home "$GAUSS_HOME" \
     --workspace-dir "$WORKSPACE_DIR" \
     --with-workspace \
     --skip-system-packages
 grep -F 'SMOKE_RERUN_MARKER' "$WORKSPACE_DIR/PAPER.md" >/dev/null || die "expected PAPER.md marker to survive rerun"
 assert_exists "$WORKSPACE_DIR/KEEP_ME.txt"
-grep -F 'OPENAI_API_KEY="dummy-installer-key"' "$GAUSS_HOME/.env" >/dev/null || die "expected staged OPENAI_API_KEY to be preserved on rerun"
+grep -F "OPENAI_API_KEY=\"$INITIAL_OPENAI_API_KEY\"" "$GAUSS_HOME/.env" >/dev/null || die "expected staged OPENAI_API_KEY to be preserved on rerun"
 grep -F 'OPENAI_BASE_URL="https://api.openai.com/v1"' "$GAUSS_HOME/.env" >/dev/null || die "expected OPENAI_BASE_URL to be preserved on rerun"
 
 echo "==> Verifying launcher summary"
@@ -141,5 +142,34 @@ SUMMARY_OUTPUT="$(gauss-launch-session --print-summary)"
 printf '%s\n' "$SUMMARY_OUTPUT"
 [[ "$SUMMARY_OUTPUT" == *"OpenAI-compatible main provider configured"* ]] || die "expected OpenAI provider summary"
 [[ "$SUMMARY_OUTPUT" == *"$WORKSPACE_DIR"* ]] || die "expected workspace path in launcher summary"
+
+echo "==> Verifying no-provider launcher fallback state"
+cp "$GAUSS_HOME/.env" "$GAUSS_HOME/.env.backup"
+python3 - "$GAUSS_HOME" <<'PY'
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1]) / ".env"
+drop_keys = {
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_TOKEN",
+    "OPENAI_BASE_URL",
+}
+kept = []
+for line in env_path.read_text(encoding="utf-8").splitlines():
+    key = line.split("=", 1)[0].strip()
+    if key not in drop_keys:
+        kept.append(line)
+env_path.write_text(("\n".join(kept).rstrip() + "\n") if kept else "", encoding="utf-8")
+PY
+
+NO_PROVIDER_SUMMARY="$(gauss-launch-session --print-summary)"
+printf '%s\n' "$NO_PROVIDER_SUMMARY"
+[[ "$NO_PROVIDER_SUMMARY" == *"No staged OpenRouter, Anthropic, or OpenAI key found for the main interactive provider."* ]] || die "expected missing-provider summary"
+grep -F "GAUSS_FORCE_FIRST_TIME_SETUP=1 gauss setup || true" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected forced first-time setup handoff in launcher"
+grep -F "exec bash -i" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected interactive shell fallback in launcher"
+mv "$GAUSS_HOME/.env.backup" "$GAUSS_HOME/.env"
 
 echo "==> ubuntu_repository_local_install_smoke passed"

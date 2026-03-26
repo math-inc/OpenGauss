@@ -1,28 +1,23 @@
 @echo off
 REM ============================================================================
-REM Gauss Agent Installer for Windows (CMD wrapper)
+REM Open Gauss WSL Installer (CMD wrapper)
 REM ============================================================================
-REM This batch file launches the PowerShell installer for users running CMD.
-REM
-REM Usage:
-REM   curl -fsSL https://raw.githubusercontent.com/NousResearch/gauss-agent/main/scripts/install.cmd -o install.cmd && install.cmd && del install.cmd
-REM
-REM Or if you're already in PowerShell, use the direct command instead:
-REM   irm https://raw.githubusercontent.com/NousResearch/gauss-agent/main/scripts/install.ps1 | iex
+REM Windows support is WSL-first. This wrapper forwards to install.ps1, which
+REM bootstraps WSL2 and then runs the standard Linux installer there.
 REM ============================================================================
 
 echo.
-echo  Gauss Agent Installer
-echo  Launching PowerShell installer...
+echo  Open Gauss WSL Installer
+echo  Launching PowerShell bootstrap...
 echo.
 
-powershell -ExecutionPolicy ByPass -NoProfile -Command "irm https://raw.githubusercontent.com/NousResearch/gauss-agent/main/scripts/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -NoProfile -File "%~dp0install.ps1" %*
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo  Installation failed. Please try running PowerShell directly:
-    echo    powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/NousResearch/gauss-agent/main/scripts/install.ps1 | iex"
+    echo  Installation failed.
+    echo  Re-run in PowerShell for the full error output:
+    echo    powershell -ExecutionPolicy ByPass -NoProfile -File "%~dp0install.ps1"
     echo.
-    pause
     exit /b 1
 )

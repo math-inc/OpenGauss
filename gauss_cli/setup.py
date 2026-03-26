@@ -2492,10 +2492,17 @@ def run_setup_wizard(args):
     from gauss_cli.auth import get_active_provider
 
     active_provider = get_active_provider()
+    force_first_time = (
+        str(getattr(args, "force_first_time", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+        or os.getenv("GAUSS_FORCE_FIRST_TIME_SETUP", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
     is_existing = (
-        bool(get_env_value("OPENROUTER_API_KEY"))
-        or bool(get_env_value("OPENAI_BASE_URL"))
-        or active_provider is not None
+        not force_first_time
+        and (
+            bool(get_env_value("OPENROUTER_API_KEY"))
+            or bool(get_env_value("OPENAI_BASE_URL"))
+            or active_provider is not None
+        )
     )
 
     print()

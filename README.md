@@ -20,6 +20,8 @@ Each lifted slash command spawns a managed backend child agent in the active pro
 
 ## Install
 
+If you want the fastest path, `https://morph.new/opengauss` launches the hosted setup in under 10 seconds. The local installers below are the batteries-included path for your own machine and can take up to 10 minutes.
+
 ### macOS and Linux
 
 ```bash
@@ -28,36 +30,58 @@ cd OpenGauss
 ./scripts/install.sh
 ```
 
-The installer will:
+This is the canonical local install path. It bootstraps the local installer runtime, runs the shared `opengauss` installer flow on your machine, and then auto-attaches to the final `gauss` tmux session when possible.
 
-1. Install system dependencies (via Homebrew on macOS, apt on Ubuntu/Debian)
-2. Install `uv`, Node.js, Claude Code, and the Lean toolchain if missing
-3. Create a Python virtualenv and install Gauss
-4. Link the `gauss` command to `~/.local/bin/gauss`
-5. Set up `~/.gauss/` for runtime config and secrets
-6. Auto-configure the main provider/model from staged keys when possible
+It will:
 
-`~/.local/bin/gauss` is ready immediately after install. To use plain `gauss` in the same terminal, reload your shell first:
+1. Install `uv` if needed
+2. Create a repo-local installer environment
+3. Install or upgrade the local runner
+4. Run the shared `opengauss` installer flow on your machine
+5. Auto-attach you to the local `gauss` tmux session when possible, or print the exact `tmux attach -t gauss` command if not
 
-```bash
-source ~/.bashrc   # bash
-source ~/.zshrc    # zsh
-gauss
-```
-
-Run `gauss setup` later if you want to review or change the selected provider, model, or other settings.
-
-If you prefer Gauss to create a prewarmed Lean workspace during install:
+You can pass normal template-runner flags through to the alternate script, for example:
 
 ```bash
-./scripts/install.sh --with-workspace
+./scripts/install.sh --plain
+./scripts/install.sh --secret OPENAI_API_KEY=...
+./scripts/install.sh --secret ANTHROPIC_API_KEY=...
 ```
 
-Otherwise, after install just start Gauss:
+### Windows (via WSL2)
+
+Open Gauss on Windows runs through WSL2 using the same shared installer flow.
+
+From PowerShell:
+
+```powershell
+.\scripts\install.ps1 -WithWorkspace
+```
+
+This bootstrap:
+
+1. Starts your WSL distro
+2. Clones or updates `OpenGauss` inside your WSL home directory
+3. Runs `./scripts/install.sh` there, which executes the shared `opengauss` installer flow inside WSL
+
+If no WSL distro is initialized yet, the bootstrap will install Ubuntu for you with `wsl --install -d Ubuntu`. If that process drops you into the new Linux shell, type `exit` to return to PowerShell and rerun `.\scripts\install.ps1 -WithWorkspace`. Windows may also ask to enable WSL features or restart before you rerun the installer.
+
+If WSL is not installed yet:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+You can also install manually inside WSL:
 
 ```bash
-gauss
+wsl
+git clone https://github.com/math-inc/OpenGauss.git ~/OpenGauss
+cd ~/OpenGauss
+./scripts/install.sh
 ```
+
+Use a Linux path such as `~/OpenGauss`, not `/mnt/c/...`, for the best performance and terminal behavior.
 ## Configuration
 
 ### 🖥️ Using Local Models (vLLM)
@@ -67,15 +91,8 @@ If you prefer to run models locally (e.g., using a local GPU) to save on API cos
    ```bash
    python -m vllm.entrypoints.openai.api_server --model <model_name>
    ```
+
 2. **Point Gauss at that server** with `gauss setup`, or update `OPENAI_BASE_URL` in `~/.gauss/.env`.
-
-### Options
-
-```bash
-./scripts/install.sh --with-workspace    # Also create a prewarmed Lean+Mathlib workspace (~2 GB download)
-./scripts/install.sh --skip-system-packages  # Skip Homebrew/apt package installation
-./scripts/install.sh --recreate-venv     # Force-recreate the Python virtualenv
-```
 
 ### Updating
 
