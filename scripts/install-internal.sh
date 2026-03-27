@@ -85,6 +85,11 @@ Options:
 Environment:
   GAUSS_HOME              Same as --gauss-home
   GAUSS_WORKSPACE_DIR     Same as --workspace-dir
+  GAUSS_SKIP_SYSTEM_PACKAGES
+                          true/false equivalent of --skip-system-packages
+  GAUSS_CREATE_WORKSPACE  true/false equivalent of --with-workspace
+  GAUSS_RECREATE_VENV     true/false equivalent of --recreate-venv
+  GAUSS_SETUP_MODE        auto/skip/run equivalent of setup flags
   GAUSS_LEAN_TOOLCHAIN    Lean toolchain used for workspace bootstrap
                           (default: leanprover/lean4:v4.28.0)
 
@@ -136,6 +141,46 @@ refresh_paths() {
     VENV_PYTHON="$VENV_BIN/python"
     GUIDE_DIR="$GAUSS_HOME/guide"
     INSTALL_ROOT_FILE="$GAUSS_HOME/install-root"
+}
+
+set_boolean_from_env() {
+    local env_name="$1"
+    local target_name="$2"
+    if [ "${!env_name+x}" != "x" ]; then
+        return
+    fi
+    case "${!env_name}" in
+        1|true|TRUE|yes|YES|on|ON)
+            printf -v "$target_name" true
+            ;;
+        0|false|FALSE|no|NO|off|OFF|"")
+            printf -v "$target_name" false
+            ;;
+        *)
+            log_error "$env_name must be one of: 1, 0, true, false, yes, no, on, off."
+            exit 1
+            ;;
+    esac
+}
+
+apply_env_overrides() {
+    set_boolean_from_env "GAUSS_RECREATE_VENV" "RECREATE_VENV"
+    set_boolean_from_env "GAUSS_SKIP_SYSTEM_PACKAGES" "SKIP_SYSTEM_PACKAGES"
+    set_boolean_from_env "GAUSS_CREATE_WORKSPACE" "CREATE_WORKSPACE"
+
+    if [ "${GAUSS_SETUP_MODE+x}" = "x" ]; then
+        case "$GAUSS_SETUP_MODE" in
+            auto|skip|run)
+                SETUP_MODE="$GAUSS_SETUP_MODE"
+                ;;
+            *)
+                log_error "GAUSS_SETUP_MODE must be one of: auto, skip, run."
+                exit 1
+                ;;
+        esac
+    fi
+
+    refresh_paths
 }
 
 parse_args() {
@@ -1436,6 +1481,7 @@ print_summary() {
 }
 
 main() {
+    apply_env_overrides
     parse_args "$@"
     print_banner
     detect_os
