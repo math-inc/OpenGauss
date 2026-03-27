@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -199,17 +200,13 @@ def test_install_managed_claude_plugin_registers_marketplace_and_returns_install
         "plugin",
         "marketplace",
         "add",
-        "--scope",
-        "user",
         str(marketplace_source),
     ]
     assert calls[1][0] == [
         "/usr/bin/claude",
         "plugin",
         "install",
-        "--scope",
-        "user",
-        "lean4@lean4-skills",
+        "lean4",
     ]
     assert calls[2][0] == [
         "/usr/bin/claude",
@@ -954,18 +951,133 @@ def test_ensure_claude_user_plugin_state_enables_plugin_and_autoupdate(monkeypat
         "plugin",
         "marketplace",
         "add",
-        "--scope",
-        "user",
         "cameronfreer/lean4-skills",
     ]
     assert calls[1] == [
         "/usr/bin/claude",
         "plugin",
         "install",
-        "--scope",
-        "user",
-        "lean4@lean4-skills",
+        "lean4",
     ]
+
+
+def test_install_claude_plugin_target_falls_back_to_plugin_id(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(argv, *, error_prefix, env=None, cwd=None):
+        del error_prefix, env, cwd
+        calls.append(list(argv))
+        if list(argv)[-1] == "lean4":
+            raise autoformalize.AutoformalizeStagingError("plugin name unavailable")
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(autoformalize, "_run", fake_run)
+
+    autoformalize._install_claude_plugin_target(
+        claude_executable="/usr/bin/claude",
+        cli_env={"HOME": "/tmp/home"},
+        plugin_name="lean4",
+        plugin_id="lean4@lean4-skills",
+        error_prefix="Failed to install the Lean4 Claude plugin in the user profile",
+    )
+
+    assert calls == [
+        ["/usr/bin/claude", "plugin", "install", "lean4"],
+        ["/usr/bin/claude", "plugin", "install", "lean4@lean4-skills"],
+    ]
+
+
+def test_ensure_claude_user_plugin_state_subprocess_uses_documented_cli_commands(tmp_path: Path):
+    real_home = tmp_path / "home"
+    log_path = tmp_path / "claude-commands.jsonl"
+    claude_stub = tmp_path / "claude"
+    claude_stub.write_text(
+        """#!__PYTHON__
+import json
+import os
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+log_path = Path(os.environ["GAUSS_TEST_LOG"])
+with log_path.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(argv) + "\\n")
+
+if "--scope" in argv:
+    print("error: unknown option '--scope'", file=sys.stderr)
+    raise SystemExit(1)
+
+home = Path(os.environ["HOME"])
+plugins_root = home / ".claude" / "plugins"
+
+if argv[:4] == ["plugin", "marketplace", "add", "cameronfreer/lean4-skills"]:
+    (plugins_root / "known_marketplaces.json").parent.mkdir(parents=True, exist_ok=True)
+    (plugins_root / "known_marketplaces.json").write_text(
+        json.dumps(
+            {
+                "lean4-skills": {
+                    "source": {"source": "github", "repo": "cameronfreer/lean4-skills"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    raise SystemExit(0)
+
+if argv[:3] == ["plugin", "install", "lean4"]:
+    plugin_root = plugins_root / "cache" / "lean4-skills" / "lean4" / "4.4.5"
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugins_root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "lean4@lean4-skills": [
+                        {
+                            "scope": "user",
+                            "installPath": str(plugin_root),
+                            "version": "4.4.5",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    raise SystemExit(0)
+
+print(f"unexpected argv: {argv}", file=sys.stderr)
+raise SystemExit(2)
+""",
+        encoding="utf-8",
+    )
+    claude_stub.write_text(
+        claude_stub.read_text(encoding="utf-8").replace("__PYTHON__", sys.executable, 1),
+        encoding="utf-8",
+    )
+    claude_stub.chmod(0o755)
+
+    install_path = autoformalize._ensure_claude_user_plugin_state(
+        claude_executable=str(claude_stub),
+        real_home=real_home,
+        base_environment={
+            "PATH": str(tmp_path),
+            "GAUSS_TEST_LOG": str(log_path),
+        },
+    )
+
+    commands = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert commands == [
+        ["plugin", "marketplace", "add", "cameronfreer/lean4-skills"],
+        ["plugin", "install", "lean4"],
+    ]
+    assert install_path == (
+        real_home / ".claude" / "plugins" / "cache" / "lean4-skills" / "lean4" / "4.4.5"
+    ).resolve()
 
 
 def test_sync_prewarmed_claude_plugin_links_plugin_state_into_managed_home(tmp_path: Path):

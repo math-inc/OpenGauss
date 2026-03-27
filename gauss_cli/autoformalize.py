@@ -781,6 +781,53 @@ def _find_claude_installed_plugin_root(real_home: Path) -> Path | None:
     return install_path.resolve()
 
 
+def _add_claude_marketplace(
+    *,
+    claude_executable: str,
+    cli_env: Mapping[str, str],
+    marketplace_target: str,
+    error_prefix: str,
+) -> None:
+    _run(
+        [
+            claude_executable,
+            "plugin",
+            "marketplace",
+            "add",
+            marketplace_target,
+        ],
+        env=cli_env,
+        error_prefix=error_prefix,
+    )
+
+
+def _install_claude_plugin_target(
+    *,
+    claude_executable: str,
+    cli_env: Mapping[str, str],
+    plugin_name: str,
+    plugin_id: str,
+    error_prefix: str,
+) -> None:
+    failures: list[str] = []
+    for plugin_target in (plugin_name, plugin_id):
+        try:
+            _run(
+                [
+                    claude_executable,
+                    "plugin",
+                    "install",
+                    plugin_target,
+                ],
+                env=cli_env,
+                error_prefix=error_prefix,
+            )
+            return
+        except AutoformalizeStagingError as exc:
+            failures.append(str(exc))
+    raise AutoformalizeStagingError(failures[-1])
+
+
 def _ensure_claude_user_plugin_state(
     *,
     claude_executable: str,
@@ -792,29 +839,17 @@ def _ensure_claude_user_plugin_state(
 
     cli_env = dict(base_environment)
     cli_env["HOME"] = str(real_home)
-    _run(
-        [
-            claude_executable,
-            "plugin",
-            "marketplace",
-            "add",
-            "--scope",
-            "user",
-            LEAN4_CLAUDE_MARKETPLACE_REPO,
-        ],
-        env=cli_env,
+    _add_claude_marketplace(
+        claude_executable=claude_executable,
+        cli_env=cli_env,
+        marketplace_target=LEAN4_CLAUDE_MARKETPLACE_REPO,
         error_prefix="Failed to register the Lean4 Claude marketplace in the user profile",
     )
-    _run(
-        [
-            claude_executable,
-            "plugin",
-            "install",
-            "--scope",
-            "user",
-            LEAN4_CLAUDE_PLUGIN_ID,
-        ],
-        env=cli_env,
+    _install_claude_plugin_target(
+        claude_executable=claude_executable,
+        cli_env=cli_env,
+        plugin_name=LEAN4_CLAUDE_PLUGIN_NAME,
+        plugin_id=LEAN4_CLAUDE_PLUGIN_ID,
         error_prefix="Failed to install the Lean4 Claude plugin in the user profile",
     )
 
@@ -1638,29 +1673,17 @@ def _install_managed_claude_plugin(
     cli_env = dict(base_environment)
     cli_env["HOME"] = str(backend_home)
 
-    _run(
-        [
-            claude_executable,
-            "plugin",
-            "marketplace",
-            "add",
-            "--scope",
-            "user",
-            str(marketplace_source),
-        ],
-        env=cli_env,
+    _add_claude_marketplace(
+        claude_executable=claude_executable,
+        cli_env=cli_env,
+        marketplace_target=str(marketplace_source),
         error_prefix="Failed to register the managed Lean Claude marketplace",
     )
-    _run(
-        [
-            claude_executable,
-            "plugin",
-            "install",
-            "--scope",
-            "user",
-            plugin_id,
-        ],
-        env=cli_env,
+    _install_claude_plugin_target(
+        claude_executable=claude_executable,
+        cli_env=cli_env,
+        plugin_name=plugin_name,
+        plugin_id=plugin_id,
         error_prefix="Failed to install the managed Lean Claude plugin",
     )
     result = _run(
