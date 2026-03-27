@@ -85,6 +85,7 @@ assert_exists "$GAUSS_HOME/autoformalize/assets/lean4-skills/.gauss-managed-revi
 assert_exists "$GAUSS_HOME/skins/mathinc.yaml"
 assert_exists "$WORKSPACE_DIR/PAPER.md"
 assert_exists "$WORKSPACE_DIR/.gauss/project.yaml"
+assert_exists "$WORKSPACE_DIR/lean-toolchain"
 assert_exists "$HOME/.local/bin/gauss-configure-main-provider"
 assert_exists "$HOME/.local/bin/gauss-open-session"
 assert_exists "$HOME/.local/bin/gauss-open-guide"
@@ -119,6 +120,7 @@ assert config["agent"]["max_turns"] == 90
 assert config["model"]["provider"] == "custom"
 assert config["model"]["default"] == "gpt-5.4"
 assert config["model"]["base_url"] == "https://api.openai.com/v1"
+assert (workspace_dir / "lean-toolchain").read_text(encoding="utf-8").strip() == "leanprover/lean4:v4.28.0"
 
 env_text = (gauss_home / ".env").read_text(encoding="utf-8")
 assert f'OPENAI_API_KEY="{expected_key}"' in env_text

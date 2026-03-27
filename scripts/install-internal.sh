@@ -28,6 +28,7 @@ NC='\033[0m'
 
 PYTHON_VERSION="3.11"
 NODE_MAJOR="22"
+LEAN_TOOLCHAIN="${GAUSS_LEAN_TOOLCHAIN:-leanprover/lean4:v4.28.0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -84,6 +85,8 @@ Options:
 Environment:
   GAUSS_HOME              Same as --gauss-home
   GAUSS_WORKSPACE_DIR     Same as --workspace-dir
+  GAUSS_LEAN_TOOLCHAIN    Lean toolchain used for workspace bootstrap
+                          (default: leanprover/lean4:v4.28.0)
 
 Optional staged provider keys:
   OPENROUTER_API_KEY
@@ -494,7 +497,7 @@ ensure_global_cli_tools() {
 }
 
 ensure_lean_toolchain() {
-    log_info "Ensuring elan + Lean stable are available..."
+    log_info "Ensuring elan + Lean $LEAN_TOOLCHAIN are available..."
 
     if ! command -v elan >/dev/null 2>&1 && [ ! -x "$HOME/.elan/bin/elan" ]; then
         local elan_script
@@ -510,14 +513,15 @@ ensure_lean_toolchain() {
         exit 1
     fi
 
-    elan toolchain install stable >/dev/null 2>&1 || true
-    elan default stable >/dev/null 2>&1
+    elan toolchain install "$LEAN_TOOLCHAIN" >/dev/null 2>&1 || true
+    elan default "$LEAN_TOOLCHAIN" >/dev/null 2>&1
 
     if ! command -v lake >/dev/null 2>&1; then
         log_error "lake is not available after configuring Lean."
         exit 1
     fi
 
+    log_success "Lean toolchain selected: $LEAN_TOOLCHAIN"
     log_success "Lean ready: $(elan --version | head -n 1)"
     log_success "Lake ready: $(lake --version | head -n 1)"
 }
