@@ -128,6 +128,14 @@ print_direct_start_hint() {
   printf 'Open Gauss is ready. Start with: gauss setup\n'
 }
 
+run_local_template() {
+  if [ "${#MORPH_ARGS[@]}" -gt 0 ]; then
+    "$RUNNER_VENV/bin/morphcloud" devbox template run "$INSTALL_TARGET" --experimental-run-locally "${MORPH_ARGS[@]}"
+    return
+  fi
+  "$RUNNER_VENV/bin/morphcloud" devbox template run "$INSTALL_TARGET" --experimental-run-locally
+}
+
 parse_args "$@"
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -148,7 +156,7 @@ fi
 uv pip install --python "$RUNNER_VENV/bin/python" morphcloud --upgrade
 
 printf 'Running Open Gauss installer flow locally from target: %s\n' "$INSTALL_TARGET"
-"$RUNNER_VENV/bin/morphcloud" devbox template run "$INSTALL_TARGET" --experimental-run-locally "${MORPH_ARGS[@]}"
+run_local_template
 run_exit=$?
 if [ "$run_exit" -ne 0 ]; then
   exit "$run_exit"

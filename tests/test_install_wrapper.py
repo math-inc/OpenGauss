@@ -128,3 +128,73 @@ PY
         "GAUSS_SETUP_MODE": "skip",
         "GAUSS_RECREATE_VENV": "1",
     }
+
+
+def test_install_wrapper_supports_empty_morph_passthrough_on_bash_nounset(tmp_path):
+    repo = tmp_path / "repo"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "install.sh", scripts_dir / "install.sh")
+
+    runner_bin = repo / ".opengauss-installer-venv" / "bin"
+    runner_bin.mkdir(parents=True)
+    _write_executable(
+        runner_bin / "python",
+        """#!/usr/bin/env bash
+        exit 0
+        """,
+    )
+
+    args_log = tmp_path / "morph-noargs.txt"
+    _write_executable(
+        runner_bin / "morphcloud",
+        f"""#!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$@" > "{args_log}"
+        """,
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(
+        fake_bin / "uv",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        exit 0
+        """,
+    )
+    _write_executable(
+        fake_bin / "tmux",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        exit 1
+        """,
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["OPEN_GAUSS_AUTO_ATTACH"] = "0"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/install.sh",
+            "--gauss-home",
+            "/tmp/custom-gauss-home",
+            "--workspace-dir",
+            "/tmp/custom-workspace",
+            "--skip-setup",
+        ],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert args_log.read_text(encoding="utf-8").splitlines() == [
+        "devbox",
+        "template",
+        "run",
+        "opengauss",
+        "--experimental-run-locally",
+    ]
