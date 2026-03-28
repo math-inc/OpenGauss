@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -273,6 +274,112 @@ EOF
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
     env["OPEN_GAUSS_AUTO_ATTACH"] = "0"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/install.sh",
+            "--skip-setup",
+        ],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    uv_calls = uv_log.read_text(encoding="utf-8").splitlines()
+    assert uv_calls[:4] == [
+        "venv",
+        "--python",
+        "3.13",
+        str(repo / ".opengauss-installer-venv"),
+    ]
+    assert args_log.read_text(encoding="utf-8").splitlines() == [
+        "devbox",
+        "template",
+        "run",
+        "opengauss",
+        "--experimental-run-locally",
+    ]
+
+
+def test_install_wrapper_recreates_unsupported_runner_venv(tmp_path):
+    repo = tmp_path / "repo"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "install.sh", scripts_dir / "install.sh")
+
+    runner_bin = repo / ".opengauss-installer-venv" / "bin"
+    runner_bin.mkdir(parents=True)
+    _write_executable(
+        runner_bin / "python",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        exit 1
+        """,
+    )
+
+    args_log = tmp_path / "morph-args.txt"
+    uv_log = tmp_path / "uv-log.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    _write_executable(
+        fake_bin / "python3",
+        f"""#!{sys.executable}
+import os
+import subprocess
+import sys
+
+if len(sys.argv) > 1 and sys.argv[1] == "-":
+    source = sys.stdin.read()
+    raise SystemExit(subprocess.run([{sys.executable!r}, "-", *sys.argv[2:]], input=source, text=True).returncode)
+
+raise SystemExit(1)
+""",
+    )
+
+    _write_executable(
+        fake_bin / "uv",
+        f"""#!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$@" >> "{uv_log}"
+        if [ "$1" = "venv" ]; then
+          runner_dir="$4/bin"
+          mkdir -p "$runner_dir"
+          cat > "$runner_dir/python" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+          chmod +x "$runner_dir/python"
+          cat > "$runner_dir/morphcloud" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$@" > "{args_log}"
+EOF
+          chmod +x "$runner_dir/morphcloud"
+          exit 0
+        fi
+        if [ "$1" = "pip" ]; then
+          exit 0
+        fi
+        exit 1
+        """,
+    )
+
+    _write_executable(
+        fake_bin / "tmux",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        exit 1
+        """,
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["OPEN_GAUSS_AUTO_ATTACH"] = "0"
+    env["OPEN_GAUSS_INSTALLER_RUNNER_PYTHON"] = "3.13"
 
     result = subprocess.run(
         [
