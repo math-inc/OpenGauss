@@ -1,0 +1,6 @@
+name = "HelloSorry"
+version = "0.1.0"
+defaultTargets = ["HelloSorry"]
+
+[[lean_lib]]
+name = "HelloSorry"
