@@ -1,4 +1,4 @@
-name: Refresh Shared Template
+name: Publish Shared Template
 
 on:
   push:
@@ -10,88 +10,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  refresh-opengauss-template:
+  publish-opengauss-template:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       DEVBOX_TEMPLATE_BASE_URL: https://devbox.svc.cloud.morph.so
       TEMPLATE_ALIAS: opengauss
+      TEMPLATE_FILE: .github/morph/opengauss-template.yaml
+      PYTHONUNBUFFERED: "1"
       MORPH_API_KEY: ${{ secrets.MORPH_API_KEY }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Validate refresh credentials
         run: |
           if [ -z "${MORPH_API_KEY}" ]; then
-            echo "GitHub secret MORPH_API_KEY is required to refresh the shared template alias." >&2
+            echo "GitHub secret MORPH_API_KEY is required to publish the shared template alias." >&2
+            exit 1
+          fi
+          if [ ! -f "${TEMPLATE_FILE}" ]; then
+            echo "Tracked Morph template file is missing: ${TEMPLATE_FILE}" >&2
             exit 1
           fi
 
-      - name: Refresh shared template alias
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-          import urllib.request
-
-          base = os.environ["DEVBOX_TEMPLATE_BASE_URL"].rstrip("/")
-          key = os.environ["MORPH_API_KEY"]
-          alias = os.environ["TEMPLATE_ALIAS"]
-
-          body = {
-              "description": f"Automatic refresh from {os.environ.get('GITHUB_REPOSITORY', 'repo')}@{os.environ.get('GITHUB_SHA', '')[:12]}"
-          }
-
-          req = urllib.request.Request(
-              f"{base}/api/templates/aliases/{alias}/refresh",
-              data=json.dumps(body).encode("utf-8"),
-              headers={
-                  "Authorization": f"Bearer {key}",
-                  "Content-Type": "application/json",
-              },
-              method="POST",
-          )
-
-          with urllib.request.urlopen(req, timeout=120) as resp:
-              started = json.load(resp)
-
-          print("refresh_started", json.dumps(started))
-
-          events_path = started.get("events_path")
-          if not events_path:
-              sys.exit("refresh response did not include events_path")
-
-          events_req = urllib.request.Request(
-              f"{base}{events_path}",
-              headers={"Authorization": f"Bearer {key}"},
-              method="GET",
-          )
-
-          completed = None
-          saw_force_rebuild = False
-          with urllib.request.urlopen(events_req, timeout=3600) as resp:
-              for raw in resp:
-                  line = raw.decode("utf-8", errors="replace").strip()
-                  if not line.startswith("data: "):
-                      continue
-                  event = json.loads(line[6:])
-                  print(json.dumps(event))
-                  if event.get("type") == "force_rebuild":
-                      saw_force_rebuild = True
-                  if event.get("type") in {"completed", "error", "cancelled"}:
-                      completed = event
-                      break
-
-          if not completed:
-              sys.exit("refresh events stream ended without a terminal event")
-          if completed.get("type") != "completed":
-              sys.exit(f"refresh failed: {completed}")
-          if not saw_force_rebuild:
-              sys.exit("refresh completed without force_rebuild event")
-
-          alias_publish = completed.get("aliasPublish") or {}
-          if not alias_publish.get("published"):
-              sys.exit(f"alias was not promoted: {alias_publish}")
-
-          print("alias_promoted_to", alias_publish.get("templateId"))
-          PY
+      - name: Publish shared template alias
+        run: python3 scripts/publish_shared_template.py

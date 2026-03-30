@@ -1,0 +1,92 @@
+name: Open Gauss Batteries Included Devbox
+description: Installer-driven Open Gauss template that uses the current checkout when run locally and otherwise clones math-inc/OpenGauss, runs the internal installer, exposes the local guide, and opens a ready Gauss session.
+steps:
+  - id: bootstrap-installer-runtime
+    title: Prepare Open Gauss Installer Runtime
+    type: command
+    run: |
+      set -euo pipefail
+      if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y
+        apt-get install -y --no-install-recommends git curl ca-certificates tmux
+      else
+        command -v git >/dev/null 2>&1 || { printf '%s\n' 'git is required.' >&2; exit 1; }
+        command -v curl >/dev/null 2>&1 || { printf '%s\n' 'curl is required.' >&2; exit 1; }
+      fi
+      mkdir -p "$HOME/.opengauss-template"
+  - id: resolve-open-gauss-repository
+    title: Prepare Open Gauss Repository
+    type: command
+    run: |
+      set -euo pipefail
+      state_dir="$HOME/.opengauss-template"
+      state_env="$state_dir/runtime.env"
+      mkdir -p "$state_dir"
+
+      repo_root=""
+      if [ -x "./scripts/install-internal.sh" ] && [ -f "./pyproject.toml" ] && [ -f "./README.md" ]; then
+        repo_root="$(pwd)"
+      else
+        repo_root="$HOME/OpenGauss"
+        if [ -d "$repo_root/.git" ]; then
+          git -C "$repo_root" fetch origin --prune
+        else
+          rm -rf "$repo_root"
+          git clone https://github.com/math-inc/OpenGauss.git "$repo_root"
+        fi
+        git -C "$repo_root" fetch origin --prune
+        git -C "$repo_root" reset --hard origin/main
+      fi
+
+      gauss_home="${GAUSS_HOME:-$HOME/.gauss}"
+      workspace_dir="${GAUSS_WORKSPACE_DIR:-$HOME/GaussWorkspace}"
+
+      cat > "$state_env" <<EOF
+      export OPEN_GAUSS_REPO_ROOT="$repo_root"
+      export GAUSS_HOME="$gauss_home"
+      export GAUSS_INSTALL_ROOT="$repo_root"
+      export GAUSS_WORKSPACE_DIR="$workspace_dir"
+      export PATH="$HOME/.local/bin:$repo_root/venv/bin:$HOME/.elan/bin:$PATH"
+      export PROMPT_TOOLKIT_NO_CPR=1
+      EOF
+
+      printf 'Using Open Gauss repository at %s\n' "$repo_root"
+      git -C "$repo_root" rev-parse --short=12 HEAD || true
+  - id: install-open-gauss
+    title: Run Open Gauss Installer
+    type: command
+    run: |
+      set -euo pipefail
+      . "$HOME/.opengauss-template/runtime.env"
+      cd "$OPEN_GAUSS_REPO_ROOT"
+      ./scripts/install-internal.sh --with-workspace --noninteractive
+      . "$HOME/.opengauss-template/runtime.env"
+      "$HOME/.local/bin/gauss-launch-session" --print-summary || true
+  - id: start-guide-server
+    title: Start Guide Iframe Server
+    type: command
+    run: |
+      set -euo pipefail
+      . "$HOME/.opengauss-template/runtime.env"
+      nohup python3 -m http.server 4310 --directory "$GAUSS_HOME/guide" >/tmp/opengauss-guide.log 2>&1 &
+      sleep 1
+  - id: expose-guide
+    title: Expose Guide Iframe
+    type: exposeHttpService
+    name: guide
+    port: 4310
+    autoOpenIframe: true
+  - id: open-gauss-session
+    title: Open Gauss tmux Session
+    type: tmuxSession
+    name: gauss
+    command: |
+      set -euo pipefail
+      . "$HOME/.opengauss-template/runtime.env"
+      if [ -f "$GAUSS_HOME/.env" ]; then
+        set -a
+        . "$GAUSS_HOME/.env"
+        set +a
+      fi
+      exec "$HOME/.local/bin/gauss-launch-session"
