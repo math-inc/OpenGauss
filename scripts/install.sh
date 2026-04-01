@@ -209,11 +209,7 @@ ensure_runner_venv
 uv pip install --python "$RUNNER_VENV/bin/python" morphcloud --upgrade
 
 printf 'Running Open Gauss installer flow locally from target: %s\n' "$INSTALL_TARGET"
-run_local_template
-run_exit=$?
-if [ "$run_exit" -ne 0 ]; then
-  exit "$run_exit"
-fi
+run_local_template || { printf 'Installer failed. Exiting.\n' >&2; exit $?; }
 
 if ! command -v tmux >/dev/null 2>&1; then
   print_direct_start_hint
