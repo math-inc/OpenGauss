@@ -181,7 +181,16 @@ ensure_runner_venv() {
   if [ -e "$RUNNER_VENV" ] || [ -L "$RUNNER_VENV" ]; then
     recreate_runner_venv
   fi
-  uv venv --python "$runner_python" "$RUNNER_VENV"
+  uv venv --seed --python "$runner_python" "$RUNNER_VENV"
+}
+
+ensure_runner_pip() {
+  if "$RUNNER_VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+    return
+  fi
+
+  "$RUNNER_VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 \
+    || die "Failed to bootstrap pip inside $RUNNER_VENV."
 }
 
 run_local_template() {
@@ -208,7 +217,8 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 ensure_runner_venv
-uv pip install --python "$RUNNER_VENV/bin/python" morphcloud --upgrade
+ensure_runner_pip
+"$RUNNER_VENV/bin/python" -m pip install --upgrade morphcloud
 
 printf 'Running Open Gauss installer flow locally from target: %s\n' "$INSTALL_TARGET"
 run_local_template

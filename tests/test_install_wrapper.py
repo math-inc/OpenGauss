@@ -243,7 +243,7 @@ def test_install_wrapper_prefers_supported_runner_python_when_python3_is_too_new
         set -euo pipefail
         printf '%s\\n' "$@" >> "{uv_log}"
         if [ "$1" = "venv" ]; then
-          runner_dir="$4/bin"
+          runner_dir="${{@: -1}}/bin"
           mkdir -p "$runner_dir"
           cat > "$runner_dir/python" <<'EOF'
 #!/usr/bin/env bash
@@ -291,8 +291,9 @@ EOF
     assert result.returncode == 0, result.stderr + result.stdout
 
     uv_calls = uv_log.read_text(encoding="utf-8").splitlines()
-    assert uv_calls[:4] == [
+    assert uv_calls[:5] == [
         "venv",
+        "--seed",
         "--python",
         "3.13",
         str(repo / ".opengauss-installer-venv"),
@@ -348,7 +349,7 @@ raise SystemExit(1)
         set -euo pipefail
         printf '%s\\n' "$@" >> "{uv_log}"
         if [ "$1" = "venv" ]; then
-          runner_dir="$4/bin"
+          runner_dir="${{@: -1}}/bin"
           mkdir -p "$runner_dir"
           cat > "$runner_dir/python" <<'EOF'
 #!/usr/bin/env bash
@@ -397,12 +398,110 @@ EOF
     assert result.returncode == 0, result.stderr + result.stdout
 
     uv_calls = uv_log.read_text(encoding="utf-8").splitlines()
-    assert uv_calls[:4] == [
+    assert uv_calls[:5] == [
         "venv",
+        "--seed",
         "--python",
         "3.13",
         str(repo / ".opengauss-installer-venv"),
     ]
+    assert args_log.read_text(encoding="utf-8").splitlines() == [
+        "devbox",
+        "template",
+        "run",
+        "opengauss",
+        "--experimental-run-locally",
+    ]
+
+
+def test_install_wrapper_installs_morphcloud_with_runner_venv_pip(tmp_path):
+    repo = tmp_path / "repo"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "install.sh", scripts_dir / "install.sh")
+
+    runner_bin = repo / ".opengauss-installer-venv" / "bin"
+    runner_bin.mkdir(parents=True)
+
+    pip_log = tmp_path / "runner-pip-log.txt"
+    args_log = tmp_path / "morph-args.txt"
+    _write_executable(
+        runner_bin / "python",
+        f"""#!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$@" >> "{pip_log}"
+        if [ "${{1:-}}" = "-" ]; then
+          exit 0
+        fi
+        if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "pip" ]; then
+          exit 0
+        fi
+        if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "ensurepip" ]; then
+          exit 0
+        fi
+        exit 1
+        """,
+    )
+    _write_executable(
+        runner_bin / "morphcloud",
+        f"""#!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$@" > "{args_log}"
+        """,
+    )
+
+    uv_log = tmp_path / "uv-log.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(
+        fake_bin / "uv",
+        f"""#!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\\n' "$@" >> "{uv_log}"
+        if [ "$1" = "pip" ]; then
+          printf '%s\\n' 'uv pip should not be used for the runner venv' >&2
+          exit 1
+        fi
+        exit 0
+        """,
+    )
+    _write_executable(
+        fake_bin / "tmux",
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        exit 1
+        """,
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["OPEN_GAUSS_AUTO_ATTACH"] = "0"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/install.sh",
+            "--skip-setup",
+        ],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    assert pip_log.read_text(encoding="utf-8").splitlines() == [
+        "-",
+        "-m",
+        "pip",
+        "--version",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "morphcloud",
+    ]
+    assert not uv_log.exists()
     assert args_log.read_text(encoding="utf-8").splitlines() == [
         "devbox",
         "template",
