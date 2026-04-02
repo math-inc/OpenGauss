@@ -10,7 +10,7 @@ OpenGauss is for Lean work, but you do **not** need to understand MCP, plugin in
 
 If you only want a guided first step, use `/start`.
 
-If you only want to ask questions first, use `/chat`.
+If you want a managed Claude Code or Codex chat session first, use `/chat`.
 
 If you want OpenGauss to work inside a Lean project, use `/project`.
 
@@ -24,7 +24,7 @@ If you want OpenGauss to work inside a Lean project, use `/project`.
 ## Which Command Should I Start With?
 
 - `/start` turns on onboarding mode, gives you the first useful commands, and lets plain text go straight to the main chat.
-- `/chat` asks a plain-language question in the main OpenGauss chat before you choose a project.
+- `/chat` opens the configured managed backend chat session before you choose a project.
 - `/project init` tells OpenGauss that the current Lean repository is your working project.
 - `/project use <path>` points OpenGauss at an already-initialized project somewhere else on disk.
 - `/project create <path> --template-source <template-or-git-url>` creates a new Lean project and registers it.
@@ -38,7 +38,7 @@ If you want OpenGauss to work inside a Lean project, use `/project`.
 2. If Morph shows a **Claim**, **Save**, or similar action for the session, use it early.
    The exact button text can change, but temporary sessions are easier to lose than claimed ones.
 3. Run `gauss-open-guide` if the browser guide is not already visible.
-4. If you want orientation first, type `/start` or `/chat`.
+4. If you want orientation first, type `/start`, or use `/chat` for the configured managed backend chat session.
 5. If you want to work on a Lean project, clone or open it and then run `/project init` or `/project use`.
 
 ### Making It Persistent
@@ -80,7 +80,7 @@ gauss
 Then:
 
 - use `/start` if you want a short first-step guide and plain-language chat mode
-- use `/chat` if you want a plain-language conversation first
+- use `/chat` if you want the configured managed backend chat session first
 - use `/project init` if you are already inside a Lean repository
 - use `/project create <path> --template-source <template-or-git-url>` if you need a new project
 

@@ -63,6 +63,7 @@ from gauss_cli.autoformalize import (
     AutoformalizeConfigError,
     AutoformalizeError,
     normalize_autoformalize_backend_name,
+    resolve_managed_chat_request,
     rewrite_forgiving_managed_command,
     resolve_autoformalize_request,
     supported_autoformalize_backends,
@@ -1036,6 +1037,27 @@ def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> 
     return parsed
 
 
+def _parse_startup_inputs_argument(
+    startup_input: str | list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    """Normalize one or more startup inputs into an ordered list."""
+    if startup_input is None:
+        return []
+    if isinstance(startup_input, str):
+        raw_values = [startup_input]
+    elif isinstance(startup_input, (list, tuple)):
+        raw_values = [str(item) for item in startup_input if item is not None]
+    else:
+        raw_values = [str(startup_input)]
+
+    parsed: list[str] = []
+    for raw in raw_values:
+        normalized = raw.strip()
+        if normalized:
+            parsed.append(normalized)
+    return parsed
+
+
 def save_config_value(key_path: str, value: any) -> bool:
     """
     Save a value to the active config file at the specified key path.
@@ -1117,6 +1139,7 @@ class GaussCLI:
         resume: str = None,
         checkpoints: bool = False,
         pass_session_id: bool = False,
+        startup_inputs: list[str] | None = None,
     ):
         """
         Initialize the Gauss CLI.
@@ -1132,6 +1155,7 @@ class GaussCLI:
             compact: Use compact display mode
             resume: Session ID to resume (restores conversation history from SQLite)
             pass_session_id: Include the session ID in the agent's system prompt
+            startup_inputs: Commands or messages to enqueue when the interactive UI starts
         """
         # Route output through prompt_toolkit-safe rendering once the TUI starts.
         self._app = None  # prompt_toolkit Application (set in run())
@@ -1305,6 +1329,7 @@ class GaussCLI:
         self._image_counter = 0
         self.preloaded_skills: list[str] = []
         self._startup_skills_line_shown = False
+        self._startup_inputs = list(startup_inputs or [])
 
         # Voice mode state (also reinitialized inside run() for interactive TUI).
         self._voice_lock = threading.Lock()
@@ -1619,6 +1644,7 @@ class GaussCLI:
             cmd_lower.startswith("/autoformalize")
             or cmd_lower.startswith("/auto_formalize")
             or cmd_lower.startswith("/auto-formalize")
+            or cmd_lower.startswith("/chat")
             or cmd_lower.startswith("/draft")
             or cmd_lower.startswith("/formalize")
             or cmd_lower.startswith("/prove")
@@ -2397,7 +2423,7 @@ class GaussCLI:
             _cprint(f"\n  {_DIM}Active project: {project_summary}{_RST}")
         else:
             _cprint(
-                f"\n  {_DIM}No active project — use /start or /chat for orientation, or /project init, "
+                f"\n  {_DIM}No active project — use /start for inline onboarding, /chat for managed backend chat, or /project init, "
                 f"/project convert, /project create <path>, or /project use <path>.{_RST}"
             )
 
@@ -2414,7 +2440,7 @@ class GaussCLI:
                 )
 
         _cprint(
-            f"\n  {_DIM}Tip: Start with /start or /chat if you want orientation first. Use /project when you're ready to work in a Lean repo, "
+            f"\n  {_DIM}Tip: Start with /start for inline onboarding or /chat for managed backend chat if you want orientation first. Use /project when you're ready to work in a Lean repo, "
             f"then launch /prove, /review, /checkpoint, /refactor, /golf, /draft, /autoprove, /formalize, or /autoformalize.{_RST}"
         )
         _cprint(f"  {_DIM}Multi-line: Alt+Enter for a new line{_RST}")
@@ -3385,8 +3411,8 @@ class GaussCLI:
             f"{prefix} Use /project init, /project convert, /project create <path>, or /project use <path> first.",
         )
         self._print_surface_notice(
-            "[dim]If you only want orientation first, run `/start` or `/chat` and ask a plain-language question.[/]",
-            "If you only want orientation first, run /start or /chat and ask a plain-language question.",
+            "[dim]If you only want orientation first, run `/start` for inline onboarding chat or `/chat` for the configured managed backend chat session.[/]",
+            "If you only want orientation first, run /start for inline onboarding chat or /chat for the configured managed backend chat session.",
         )
         self._print_surface_notice(
             f"[dim]{detail}[/]",
@@ -3419,56 +3445,119 @@ class GaussCLI:
         self._print_project_lock_notice(command_label=command_label)
         return True
 
+    @staticmethod
+    def _wait_for_interactive_swarm_task(task) -> tuple[int | None, str]:
+        """Wait briefly for an interactive swarm task PTY to become attachable."""
+        task_pty_master_fd = getattr(task, "pty_master_fd", None)
+        task_status = getattr(task, "status", "running")
+        for _ in range(20):
+            if task_pty_master_fd is not None and task_status == "running":
+                break
+            time.sleep(0.1)
+            task_pty_master_fd = getattr(task, "pty_master_fd", None)
+            task_status = getattr(task, "status", "running")
+        return task_pty_master_fd, task_status
+
+    def _attach_spawned_interactive_task(
+        self,
+        task,
+        *,
+        fallback_spawned_message: str,
+        fallback_attach_message: str,
+    ) -> None:
+        """Attach to an interactive swarm task when ready, or print fallback guidance."""
+        task_pty_master_fd, task_status = self._wait_for_interactive_swarm_task(task)
+        if task_pty_master_fd is not None and task_status == "running":
+            self._attach_to_swarm_task(task.task_id)
+            return
+
+        cc = ChatConsole()
+        cc.print(fallback_spawned_message)
+        cc.print(fallback_attach_message)
+
+    def _active_managed_backend_name(self) -> str:
+        """Return the normalized backend used for managed chat and Lean workflows."""
+        available = supported_autoformalize_backends()
+        active_backend_raw = (
+            os.environ.get("GAUSS_AUTOFORMALIZE_BACKEND")
+            or self.config.get("gauss", {}).get("autoformalize", {}).get("backend", "")
+            or available[0]
+        )
+        try:
+            return normalize_autoformalize_backend_name(active_backend_raw)
+        except AutoformalizeConfigError:
+            return str(active_backend_raw or available[0])
+
+    def _spawn_managed_chat_session(self, payload: str):
+        """Launch a managed provider chat child session and return the task metadata."""
+        plan = resolve_managed_chat_request(
+            payload,
+            self.config,
+            active_cwd=self._active_handoff_cwd(),
+        )
+
+        swarm = SwarmManager()
+        description = payload.strip() or "managed chat"
+        task = swarm.spawn_interactive(
+            theorem=payload.strip() or "managed chat",
+            description=description,
+            argv=list(plan.handoff_request.argv),
+            cwd=plan.handoff_request.cwd,
+            env=plan.handoff_request.env,
+            workflow_kind="chat",
+            workflow_command="/chat",
+            backend_name=plan.backend_name,
+        )
+        return task, description, plan.backend_name
+
     def _handle_chat_command(self, cmd: str):
-        """Handle `/chat` onboarding mode before project selection."""
+        """Handle `/chat` by opening the configured managed backend chat session."""
         parts = cmd.strip().split(maxsplit=1)
         payload = parts[1].strip() if len(parts) > 1 else ""
         lowered = payload.lower()
 
-        if not payload or lowered in {"on", "enable", "start"}:
-            self._chat_mode_enabled = True
+        if lowered == "status":
+            active_backend = self._active_managed_backend_name()
             self._print_surface_notice(
-                "[bold green]`/chat` is on.[/] "
-                "[dim]Plain text now goes to the main interactive provider even without an active Gauss project. "
-                "Use `/chat off` to go back to project-first mode.[/]",
-                "`/chat` is on. Plain text now goes to the main interactive provider even without an active Gauss project. Use /chat off to go back to project-first mode.",
+                "[dim]`/chat` opens the configured managed backend chat session "
+                f"(`{active_backend}`). Use `/autoformalize-backend` to switch backends, or `/start` "
+                "for inline onboarding chat in the current Gauss session.[/]",
+                f"`/chat` opens the configured managed backend chat session ({active_backend}). "
+                "Use /autoformalize-backend to switch backends, or /start for inline onboarding chat in the current Gauss session.",
             )
             return
 
         if lowered in {"off", "disable", "stop"}:
-            self._chat_mode_enabled = False
             self._print_surface_notice(
-                "[bold yellow]`/chat` is off.[/] "
-                "[dim]Plain text without an active project will again prompt you to use `/project` first.[/]",
-                "`/chat` is off. Plain text without an active project will again prompt you to use /project first.",
+                "[dim]Inline `/chat` mode has been removed. "
+                "Use `/start` for inline onboarding chat, or run `/chat` to open the managed backend chat session.[/]",
+                "Inline /chat mode has been removed. Use /start for inline onboarding chat, or run /chat to open the managed backend chat session.",
             )
             return
 
-        if lowered == "status":
-            if self._chat_mode_active():
-                self._print_surface_notice(
-                    "[bold green]`/chat` is currently on.[/]",
-                    "`/chat` is currently on.",
-                )
-            else:
-                self._print_surface_notice(
-                    "[bold yellow]`/chat` is currently off.[/]",
-                    "`/chat` is currently off.",
-                )
-            return
+        if lowered in {"on", "enable", "start"}:
+            payload = ""
 
-        self._chat_mode_enabled = True
-        self._print_surface_notice(
-            "[dim]`/chat` is on — sending your message to the main interactive provider.[/]",
-            "`/chat` is on - sending your message to the main interactive provider.",
+        task = None
+        description = payload.strip() or "managed chat"
+        backend_name = self._active_managed_backend_name()
+        with self._busy_command(self._slow_command_status("/chat")):
+            try:
+                task, description, backend_name = self._spawn_managed_chat_session(payload)
+            except (AutoformalizeError, HandoffError) as exc:
+                print(f"(>_<) {exc}")
+                return
+        self._attach_spawned_interactive_task(
+            task,
+            fallback_spawned_message=(
+                f"[dim]Spawned managed chat session {task.task_id} "
+                f"({backend_name}): {description}[/]"
+            ),
+            fallback_attach_message=(
+                f"[dim]Use `/swarm attach {task.task_id}` to connect. "
+                f"`/swarm` for status. Ctrl-] to detach.[/]"
+            ),
         )
-        if hasattr(self, "_pending_input") and hasattr(self._pending_input, "put"):
-            self._pending_input.put(payload)
-        else:
-            self._print_surface_notice(
-                "[bold yellow]Chat queue is not available in this mode.[/]",
-                "Chat queue is not available in this mode.",
-            )
 
     def _handle_start_command(self, cmd: str):
         """Handle `/start` with a short first-step guide and chat-mode enablement."""
@@ -3482,9 +3571,9 @@ class GaussCLI:
             "`/start` is on. Plain text now goes to the main interactive provider even without an active Gauss project.",
         )
         self._print_surface_notice(
-            "[dim]Next: use `/chat` for plain-language questions, `/project use <path>` for an existing Lean repo, "
+            "[dim]Next: use `/chat` if you want the configured managed backend chat session, `/project use <path>` for an existing Lean repo, "
             "`/project init` in the current repo, or `/project create <path> --template-source <template-or-git-url>` for a new one.[/]",
-            "Next: use /chat for plain-language questions, /project use <path> for an existing Lean repo, /project init in the current repo, or /project create <path> --template-source <template-or-git-url> for a new one.",
+            "Next: use /chat if you want the configured managed backend chat session, /project use <path> for an existing Lean repo, /project init in the current repo, or /project create <path> --template-source <template-or-git-url> for a new one.",
         )
         self._print_surface_notice(
             "[dim]When the project is ready, run `/prove`, `/review`, `/draft`, `/autoprove`, or `/swarm`.[/]",
@@ -3789,28 +3878,16 @@ class GaussCLI:
                 project_root=str(plan.project.root),
                 backend_name=plan.managed_context.backend_name,
             )
-
-        # Wait briefly for the PTY to become available before attaching
-        task_pty_master_fd = getattr(task, "pty_master_fd", None)
-        task_status = getattr(task, "status", "running")
-        for _ in range(20):
-            if task_pty_master_fd is not None and task_status == "running":
-                break
-            time.sleep(0.1)
-            task_pty_master_fd = getattr(task, "pty_master_fd", None)
-            task_status = getattr(task, "status", "running")
-
-        if task_pty_master_fd is not None and task_status == "running":
-            self._attach_to_swarm_task(task.task_id)
-        else:
-            cc = ChatConsole()
-            cc.print(
+        self._attach_spawned_interactive_task(
+            task,
+            fallback_spawned_message=(
                 f"[dim]Spawned {plan.workflow_kind} agent {task.task_id}: {description}[/]"
-            )
-            cc.print(
+            ),
+            fallback_attach_message=(
                 f"[dim]Use `/swarm attach {task.task_id}` to connect. "
                 f"`/swarm` for status. Ctrl-] to detach.[/]"
-            )
+            ),
+        )
 
     def _handle_autoformalize_command(self, cmd: str):
         """Backward-compatible wrapper for managed Lean workflow launching."""
@@ -6324,10 +6401,10 @@ class GaussCLI:
         try:
             from gauss_cli.skin_engine import get_active_skin
             _welcome_skin = get_active_skin()
-            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Gauss! Type /start or /chat for orientation, or /help for commands.")
+            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Gauss! Type /start for inline onboarding, /chat for managed backend chat, or /help for commands.")
             _welcome_color = _welcome_skin.get_color("banner_text", "#FFF8DC")
         except Exception:
-            _welcome_text = "Welcome to Gauss! Type /start or /chat for orientation, or /help for commands."
+            _welcome_text = "Welcome to Gauss! Type /start for inline onboarding, /chat for managed backend chat, or /help for commands."
             _welcome_color = "#FFF8DC"
         self.console.print(f"[{_welcome_color}]{_welcome_text}[/]")
         self.console.print()
@@ -7405,7 +7482,10 @@ class GaussCLI:
         # Start processing thread
         process_thread = threading.Thread(target=process_loop, daemon=True)
         process_thread.start()
-        
+
+        for startup_input in getattr(self, "_startup_inputs", []) or []:
+            self._pending_input.put(startup_input)
+
         # Register atexit cleanup so resources are freed even on unexpected exit
         atexit.register(_run_cleanup)
         
@@ -7475,6 +7555,7 @@ def main(
     w: bool = False,
     checkpoints: bool = False,
     pass_session_id: bool = False,
+    startup_input: str | list[str] | tuple[str, ...] = None,
 ):
     """
     Gauss CLI - Interactive AI Assistant
@@ -7496,6 +7577,7 @@ def main(
         resume: Resume a previous session by its ID (e.g., 20260225_143052_a1b2c3)
         worktree: Run in an isolated git worktree (for parallel agents). Alias: -w
         w: Shorthand for --worktree
+        startup_input: Initial commands or messages queued when interactive mode starts
     
     Examples:
         python cli.py                            # Start interactive mode
@@ -7571,6 +7653,7 @@ def main(
             toolsets_list = ["gauss-cli"]
     
     parsed_skills = _parse_skills_argument(skills)
+    parsed_startup_inputs = _parse_startup_inputs_argument(startup_input)
 
     # Create CLI instance
     cli = GaussCLI(
@@ -7585,6 +7668,7 @@ def main(
         resume=resume,
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,
+        startup_inputs=parsed_startup_inputs,
     )
 
     if parsed_skills:

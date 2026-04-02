@@ -64,7 +64,7 @@ class TestCommands:
         """Gauss ships project management plus managed workflow commands."""
         assert COMMANDS["/paste"] == "Check clipboard for an image and attach it"
         assert COMMANDS["/start"] == "Show the first-step guide and enable plain-language chat mode"
-        assert COMMANDS["/chat"] == "Ask a plain-language question before choosing a Gauss project"
+        assert COMMANDS["/chat"] == "Open the configured managed backend chat session before choosing a Gauss project"
         assert COMMANDS["/project"] == "Create, convert, inspect, or switch the active Gauss project"
         assert COMMANDS["/prove"] == "Spawn a managed backend agent for the guided Lean prove workflow"
         assert COMMANDS["/draft"] == "Spawn a managed backend agent for the Lean draft workflow"

@@ -436,7 +436,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     if simplified:
         right_lines.append(f"[bold {accent}]Start Here[/]")
         right_lines.append(f"[{text}]`/start`[/] [dim {dim}]turn on onboarding mode and see the first steps[/]")
-        right_lines.append(f"[{text}]`/chat`[/] [dim {dim}]ask a plain-language question first[/]")
+        right_lines.append(f"[{text}]`/chat`[/] [dim {dim}]open the configured managed backend chat session[/]")
         right_lines.append(f"[{text}]`/project`[/] [dim {dim}]select or create a Gauss project[/]")
         right_lines.append(f"[{text}]`/prove`[/] [dim {dim}]guided Lean workflow[/]")
         right_lines.append(f"[{text}]`/review`[/] [dim {dim}]review, checkpoint, refactor, golf[/]")
@@ -449,7 +449,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     else:
         right_lines.append(f"[bold {accent}]Start Here[/]")
         right_lines.append(f"[{text}]`/start`[/] [dim {dim}]{long_dash} turn on onboarding mode and show the first steps[/]")
-        right_lines.append(f"[{text}]`/chat`[/] [dim {dim}]{long_dash} ask a plain-language question before choosing a project[/]")
+        right_lines.append(f"[{text}]`/chat`[/] [dim {dim}]{long_dash} open the configured managed backend chat session before choosing a project[/]")
         right_lines.append(f"[{text}]`/project`[/] [dim {dim}]{long_dash} create, convert, inspect, or switch the active project[/]")
         right_lines.append(f"[{text}]`/prove`[/] [dim {dim}]{long_dash} spawn a guided managed proving agent[/]")
         right_lines.append(f"[{text}]`/review`[/] [dim {dim}]{long_dash} review, checkpoint, refactor, or golf Lean proofs[/]")

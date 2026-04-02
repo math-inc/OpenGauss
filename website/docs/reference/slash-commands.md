@@ -13,7 +13,7 @@ Gauss intentionally ships a small default surface.
 | Command | Description |
 |---|---|
 | `/start [question]` | Show the first-step guide, enable onboarding chat mode, and optionally send a first question. |
-| `/chat [question]` | Temporarily drop into plain-language chat before selecting a project. |
+| `/chat [question]` | Open the configured managed backend chat session before selecting a project. |
 | `/prove [scope or flags]` | Launch the guided managed Lean prove workflow. |
 | `/draft [topic or flags]` | Launch the managed Lean draft workflow for declaration skeletons. |
 | `/review [scope or flags]` | Launch the read-only managed Lean review workflow. |

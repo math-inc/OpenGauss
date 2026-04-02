@@ -417,6 +417,81 @@ def test_resolve_backend_name_rejects_unknown_backend():
         autoformalize._resolve_backend_name(_config(backend="not-a-backend"), {})
 
 
+def test_build_claude_chat_runtime_uses_existing_environment_and_prompt(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(autoformalize, "_require_executable", lambda name, _msg, _env: f"/usr/bin/{name}")
+
+    runtime = autoformalize._build_claude_chat_runtime(
+        user_instruction="Explain what /project init does",
+        base_environment={"PATH": "/usr/bin", "HOME": "/tmp/chat-home"},
+        active_cwd=tmp_path,
+    )
+
+    assert runtime.backend_name == "claude-code"
+    assert runtime.argv[0] == "/usr/bin/claude"
+    assert "Explain what /project init does" in runtime.argv[1]
+    assert "skills and MCP tools" in runtime.argv[1]
+    assert runtime.child_env["HOME"] == "/tmp/chat-home"
+    assert runtime.child_env["GAUSS_MANAGED_CHAT"] == "1"
+    assert runtime.child_env["GAUSS_MANAGED_CHAT_BACKEND"] == "claude-code"
+    assert runtime.child_env["GAUSS_CHAT_CWD"] == str(tmp_path)
+    assert runtime.child_env["GAUSS_YOLO_MODE"] == "1"
+
+
+def test_build_codex_chat_runtime_uses_existing_environment_and_prompt(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(autoformalize, "_require_executable", lambda name, _msg, _env: f"/usr/bin/{name}")
+
+    runtime = autoformalize._build_codex_chat_runtime(
+        user_instruction="Plan the next onboarding step",
+        base_environment={"PATH": "/usr/bin", "CODEX_HOME": "/tmp/codex-home"},
+        active_cwd=tmp_path,
+    )
+
+    assert runtime.backend_name == "codex"
+    assert runtime.argv[0] == "/usr/bin/codex"
+    assert runtime.argv[1] == "--dangerously-bypass-approvals-and-sandbox"
+    assert "Plan the next onboarding step" in runtime.argv[2]
+    assert "return to the main Gauss session" in runtime.argv[2]
+    assert runtime.child_env["CODEX_HOME"] == "/tmp/codex-home"
+    assert runtime.child_env["GAUSS_MANAGED_CHAT"] == "1"
+    assert runtime.child_env["GAUSS_MANAGED_CHAT_BACKEND"] == "codex"
+    assert runtime.child_env["GAUSS_CHAT_CWD"] == str(tmp_path)
+
+
+def test_resolve_managed_chat_request_builds_launch_plan(monkeypatch, tmp_path: Path):
+    active_cwd = tmp_path / "workspace"
+    active_cwd.mkdir()
+    runtime = autoformalize.ManagedChatRuntime(
+        argv=["/usr/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "prompt"],
+        child_env={"PATH": "/usr/bin", "CODEX_HOME": "/tmp/codex-home"},
+        backend_name="codex",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_build_handoff_request(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(autoformalize, "_resolve_managed_chat_runtime", lambda **_kwargs: runtime)
+    monkeypatch.setattr(autoformalize, "build_handoff_request", fake_build_handoff_request)
+
+    plan = autoformalize.resolve_managed_chat_request(
+        "Explain what /project init does",
+        _config(mode="helper", backend="codex"),
+        active_cwd=str(active_cwd),
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.backend_name == "codex"
+    assert plan.user_instruction == "Explain what /project init does"
+    assert plan.active_cwd == active_cwd.resolve()
+    assert captured["argv"] == runtime.argv
+    assert captured["env"] == runtime.child_env
+    assert captured["cwd"] == str(active_cwd.resolve())
+    assert captured["requested_mode"] == "helper"
+    assert captured["label"] == "Gauss chat session"
+    assert captured["source"] == "gauss:chat"
+
+
 def test_resolve_autoformalize_request_builds_managed_launch_plan(monkeypatch, tmp_path: Path):
     shared_bundle = _shared_bundle(tmp_path)
     managed_context = autoformalize.ManagedContext(

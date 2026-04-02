@@ -176,6 +176,7 @@ printf '%s\n' "$SUMMARY_OUTPUT"
 [[ "$SUMMARY_OUTPUT" == *"$WORKSPACE_DIR"* ]] || die "expected workspace path in launcher summary"
 [[ "$SUMMARY_OUTPUT" == *"/chat"* ]] || die "expected launcher summary to mention /chat"
 [[ "$SUMMARY_OUTPUT" == *"gauss-open-guide"* ]] || die "expected launcher summary to mention gauss-open-guide"
+[[ "$SUMMARY_OUTPUT" == *"begins with /start"* ]] || die "expected launcher summary to mention automatic /start"
 
 echo "==> Verifying no-provider launcher fallback state"
 cp "$GAUSS_HOME/.env" "$GAUSS_HOME/.env.backup"
@@ -202,11 +203,11 @@ PY
 NO_PROVIDER_SUMMARY="$(gauss-launch-session --print-summary)"
 printf '%s\n' "$NO_PROVIDER_SUMMARY"
 [[ "$NO_PROVIDER_SUMMARY" == *"No staged OpenRouter, Anthropic, or OpenAI key found for the main interactive provider."* ]] || die "expected missing-provider summary"
-[[ "$NO_PROVIDER_SUMMARY" == *"/chat uses the main interactive provider"* ]] || die "expected provider notes to mention /chat"
-if grep -F "GAUSS_FORCE_FIRST_TIME_SETUP=1 gauss setup || true" "$HOME/.local/bin/gauss-launch-session" >/dev/null; then
-    die "expected launcher to stop forcing gauss setup"
-fi
-grep -F "exec bash -i" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected interactive shell fallback in launcher"
+[[ "$NO_PROVIDER_SUMMARY" == *"/chat opens the configured managed backend chat session"* ]] || die "expected provider notes to mention managed /chat"
+[[ "$NO_PROVIDER_SUMMARY" == *"runs gauss setup first"* ]] || die "expected missing-provider summary to mention setup fallback"
+grep -F "GAUSS_FORCE_FIRST_TIME_SETUP=1 gauss setup || true" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected launcher to restore first-run setup fallback when no provider is staged"
+grep -F "gauss --startup-input /start" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected launcher to auto-start gauss with /start"
+grep -F "exec bash -i" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected interactive shell fallback when no provider is staged"
 mv "$GAUSS_HOME/.env.backup" "$GAUSS_HOME/.env"
 
 echo "==> Verifying Lean bootstrap failures surface useful diagnostics"

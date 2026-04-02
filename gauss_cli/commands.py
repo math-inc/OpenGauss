@@ -21,7 +21,7 @@ from prompt_toolkit.completion import Completer, Completion
 COMMANDS_BY_CATEGORY = {
     "Start Here": {
         "/start": "Show the first-step guide and enable plain-language chat mode",
-        "/chat": "Ask a plain-language question before choosing a Gauss project",
+        "/chat": "Open the configured managed backend chat session before choosing a Gauss project",
         "/project": "Create, convert, inspect, or switch the active Gauss project",
     },
     "Workflow": {

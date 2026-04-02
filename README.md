@@ -122,7 +122,7 @@ If you want the plain-language version first, read the [Start Here guide](websit
 ```
 gauss                         # Launch the CLI
 /start                        # Show the first steps and turn on plain-language chat
-/chat                         # Ask a plain-language question first
+/chat                         # Open the configured managed backend chat session first
 /project create ~/my-project --template-source <template-or-git-url>
 /prove 1+1=2                  # Spawn a proving agent
 /swarm                        # See running agents
@@ -134,7 +134,7 @@ If you already have a Lean project:
 cd ~/my-lean-project
 gauss
 /start                        # Optional: turn on onboarding mode first
-/chat                         # Optional: ask questions before choosing a workflow
+/chat                         # Optional: open the configured managed backend chat session before choosing a workflow
 /project init                 # Register it as a Gauss project
 /prove                        # Start proving
 ```

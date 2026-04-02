@@ -469,6 +469,7 @@ def cmd_chat(args):
         "provider": getattr(args, "provider", None),
         "toolsets": args.toolsets,
         "skills": getattr(args, "skills", None),
+        "startup_input": getattr(args, "startup_input", None),
         "verbose": args.verbose,
         "quiet": getattr(args, "quiet", False),
         "query": args.query,
@@ -2440,6 +2441,12 @@ For more help on a command:
         default=False,
         help="Include the session ID in the agent's system prompt"
     )
+    parser.add_argument(
+        "--startup-input",
+        action="append",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
     
@@ -2522,6 +2529,12 @@ For more help on a command:
         action="store_true",
         default=False,
         help="Include the session ID in the agent's system prompt"
+    )
+    chat_parser.add_argument(
+        "--startup-input",
+        action="append",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     chat_parser.set_defaults(func=cmd_chat)
 

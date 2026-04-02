@@ -18,7 +18,7 @@ gauss --resume <session_id>
 gauss chat -q "hello"
 ```
 
-Inside the interactive CLI, `/start` and `/chat` are the simplest on-ramps when you want orientation before selecting a Lean project.
+Inside the interactive CLI, `/start` and `/chat` are the simplest on-ramps when you want orientation before selecting a Lean project. `/start` keeps you in Gauss; `/chat` yields the terminal to the configured managed backend and returns you to Gauss when it exits.
 
 ## Primary Workflow
 

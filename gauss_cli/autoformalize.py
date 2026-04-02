@@ -1,4 +1,4 @@
-"""Managed Lean autoformalization launcher for Gauss."""
+"""Managed backend session launchers for Gauss."""
 
 from __future__ import annotations
 
@@ -218,6 +218,33 @@ class AutoformalizeLaunchPlan:
 
 
 @dataclass(frozen=True)
+class ManagedChatRuntime:
+    """Backend-specific launch arguments and environment for `/chat`."""
+
+    argv: list[str]
+    child_env: dict[str, str]
+    backend_name: str
+
+
+@dataclass(frozen=True)
+class ManagedChatLaunchPlan:
+    """Managed launch plan for `/chat`."""
+
+    handoff_request: HandoffRequest
+    backend_name: str
+    user_instruction: str
+    active_cwd: Path
+
+    def staged_paths(self) -> dict[str, str]:
+        """Return the most useful launch metadata for diagnostics/tests."""
+        return {
+            "backend_name": self.backend_name,
+            "cwd": str(self.active_cwd),
+            "argv0": self.handoff_request.argv[0] if self.handoff_request.argv else "",
+        }
+
+
+@dataclass(frozen=True)
 class SharedLeanBundle:
     """Shared Lean assets and paths for a managed autoformalization run."""
 
@@ -260,6 +287,43 @@ def cli_only_managed_workflow_message(command_label: str = "/autoformalize") -> 
 def cli_only_autoformalize_message() -> str:
     """Return the messaging-safe `/autoformalize` explanation."""
     return cli_only_managed_workflow_message("/autoformalize")
+
+
+def resolve_managed_chat_request(
+    user_instruction: str,
+    config: Mapping[str, Any] | None,
+    *,
+    active_cwd: str | None = None,
+    base_env: Mapping[str, str] | None = None,
+) -> ManagedChatLaunchPlan:
+    """Resolve `/chat` into a managed backend interactive session."""
+    base_environment = dict(base_env or os.environ)
+    active_dir = Path(active_cwd or base_environment.get("TERMINAL_CWD") or os.getcwd()).expanduser().resolve()
+    if not active_dir.exists():
+        raise AutoformalizePreflightError(f"Active working directory does not exist: {active_dir}")
+
+    backend_name = _resolve_backend_name(config, base_environment)
+    requested_mode = _resolve_requested_mode(config)
+    runtime = _resolve_managed_chat_runtime(
+        backend_name=backend_name,
+        user_instruction=str(user_instruction or "").strip(),
+        base_environment=base_environment,
+        active_cwd=active_dir,
+    )
+    handoff_request = build_handoff_request(
+        argv=runtime.argv,
+        cwd=str(active_dir),
+        env=runtime.child_env,
+        requested_mode=requested_mode,
+        label="Gauss chat session",
+        source="gauss:chat",
+    )
+    return ManagedChatLaunchPlan(
+        handoff_request=handoff_request,
+        backend_name=runtime.backend_name,
+        user_instruction=str(user_instruction or "").strip(),
+        active_cwd=active_dir,
+    )
 
 
 def rewrite_forgiving_managed_command(command: str) -> str | None:
@@ -1345,6 +1409,28 @@ def _resolve_backend_runtime(
     raise AutoformalizeConfigError(f"Unsupported autoformalize backend: {backend_name}")
 
 
+def _resolve_managed_chat_runtime(
+    *,
+    backend_name: str,
+    user_instruction: str,
+    base_environment: Mapping[str, str],
+    active_cwd: Path,
+) -> ManagedChatRuntime:
+    if backend_name == DEFAULT_AUTOFORMALIZE_BACKEND:
+        return _build_claude_chat_runtime(
+            user_instruction=user_instruction,
+            base_environment=base_environment,
+            active_cwd=active_cwd,
+        )
+    if backend_name == CODEX_AUTOFORMALIZE_BACKEND:
+        return _build_codex_chat_runtime(
+            user_instruction=user_instruction,
+            base_environment=base_environment,
+            active_cwd=active_cwd,
+        )
+    raise AutoformalizeConfigError(f"Unsupported autoformalize backend: {backend_name}")
+
+
 def _build_claude_runtime(
     *,
     auth_mode: str,
@@ -1513,6 +1599,72 @@ def _build_claude_runtime(
     )
 
 
+def _managed_chat_backend_label(backend_name: str) -> str:
+    if backend_name == DEFAULT_AUTOFORMALIZE_BACKEND:
+        return "Claude Code"
+    if backend_name == CODEX_AUTOFORMALIZE_BACKEND:
+        return "Codex"
+    return backend_name
+
+
+def _build_managed_chat_prompt(
+    *,
+    backend_name: str,
+    active_cwd: Path,
+    user_instruction: str,
+) -> str:
+    backend_label = _managed_chat_backend_label(backend_name)
+    prompt_parts = [
+        f"You are {backend_label} in a Gauss-managed interactive chat session.",
+        "The user launched `/chat` from the main Gauss CLI and will return there when this session exits.",
+        f"Current working directory: {active_cwd}.",
+        "Use this session for onboarding, planning, repository questions, and general discussion before a specific Lean workflow is selected.",
+        "Use any skills and MCP tools that are already configured in this backend session when they are helpful.",
+        "If the user is ready to work in Lean, tell them to return to the main Gauss session and use `/project init`, `/project use`, or `/project create`, then `/prove`, `/review`, `/draft`, `/autoprove`, `/formalize`, or `/autoformalize`.",
+    ]
+    normalized_instruction = user_instruction.strip()
+    if normalized_instruction:
+        prompt_parts.append(f"Initial user request: {normalized_instruction}")
+    else:
+        prompt_parts.append("Start by asking what the user wants to do in Open Gauss.")
+    return " ".join(prompt_parts)
+
+
+def _build_claude_chat_runtime(
+    *,
+    user_instruction: str,
+    base_environment: Mapping[str, str],
+    active_cwd: Path,
+) -> ManagedChatRuntime:
+    claude_exe = _require_executable(
+        "claude",
+        "Claude Code CLI not found. Install it with `npm install -g @anthropic-ai/claude-code`.",
+        base_environment,
+    )
+    child_env = dict(base_environment)
+    child_env.update(
+        {
+            "GAUSS_MANAGED_CHAT": "1",
+            "GAUSS_MANAGED_CHAT_BACKEND": DEFAULT_AUTOFORMALIZE_BACKEND,
+            "GAUSS_CHAT_CWD": str(active_cwd),
+            "GAUSS_YOLO_MODE": "1",
+        }
+    )
+    argv = [claude_exe]
+    prompt = _build_managed_chat_prompt(
+        backend_name=DEFAULT_AUTOFORMALIZE_BACKEND,
+        active_cwd=active_cwd,
+        user_instruction=user_instruction,
+    )
+    if prompt:
+        argv.append(prompt)
+    return ManagedChatRuntime(
+        argv=argv,
+        child_env=child_env,
+        backend_name=DEFAULT_AUTOFORMALIZE_BACKEND,
+    )
+
+
 def _build_codex_runtime(
     *,
     auth_mode: str,
@@ -1669,6 +1821,44 @@ def _build_codex_runtime(
         argv=argv,
         child_env=child_env,
         managed_context=managed_context,
+    )
+
+
+def _build_codex_chat_runtime(
+    *,
+    user_instruction: str,
+    base_environment: Mapping[str, str],
+    active_cwd: Path,
+) -> ManagedChatRuntime:
+    codex_exe = _require_executable(
+        "codex",
+        "Codex CLI not found. Install the OpenAI Codex CLI and try again.",
+        base_environment,
+    )
+    child_env = dict(base_environment)
+    child_env.update(
+        {
+            "GAUSS_MANAGED_CHAT": "1",
+            "GAUSS_MANAGED_CHAT_BACKEND": CODEX_AUTOFORMALIZE_BACKEND,
+            "GAUSS_CHAT_CWD": str(active_cwd),
+            "GAUSS_YOLO_MODE": "1",
+        }
+    )
+    argv = [
+        codex_exe,
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+    prompt = _build_managed_chat_prompt(
+        backend_name=CODEX_AUTOFORMALIZE_BACKEND,
+        active_cwd=active_cwd,
+        user_instruction=user_instruction,
+    )
+    if prompt:
+        argv.append(prompt)
+    return ManagedChatRuntime(
+        argv=argv,
+        child_env=child_env,
+        backend_name=CODEX_AUTOFORMALIZE_BACKEND,
     )
 
 
