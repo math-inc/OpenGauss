@@ -97,7 +97,9 @@ def test_publish_template_reuses_alias_snapshot_and_tags(tmp_path, monkeypatch):
         assert "steps:" in body["yaml"]
         return FakeResponse({"id": "tpl_new", "status": "draft"})
 
-    def cache_template(_request):
+    def cache_template(request):
+        body = json.loads(request.data.decode("utf-8"))
+        assert body == {"force": True}
         return FakeResponse({"template_id": "tpl_new", "run_id": "run_1"})
 
     template_polls = iter(
@@ -186,7 +188,9 @@ def test_publish_template_creates_and_shares_when_alias_is_missing(tmp_path, mon
         assert body["baseSnapshotId"] == "snap_base"
         return FakeResponse({"id": "tpl_new", "status": "draft"})
 
-    def cache_template(_request):
+    def cache_template(request):
+        body = json.loads(request.data.decode("utf-8"))
+        assert body == {"force": True}
         return FakeResponse({"run_id": "run_1"})
 
     template_polls = iter(
@@ -222,3 +226,19 @@ def test_publish_template_creates_and_shares_when_alias_is_missing(tmp_path, mon
 
     assert result["template_id"] == "tpl_new"
     assert result["alias"] == "demo"
+
+
+def test_parse_bool_defaults_and_accepts_common_values():
+    module = load_module()
+
+    assert module.parse_bool(None, default=True) is True
+    assert module.parse_bool("", default=False) is False
+    assert module.parse_bool("1", default=False) is True
+    assert module.parse_bool("true", default=False) is True
+    assert module.parse_bool("yes", default=False) is True
+    assert module.parse_bool("0", default=True) is False
+    assert module.parse_bool("false", default=True) is False
+    assert module.parse_bool("no", default=True) is False
+
+    with pytest.raises(module.PublishError, match="Invalid boolean value"):
+        module.parse_bool("maybe", default=True)
