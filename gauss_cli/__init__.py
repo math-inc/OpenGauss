@@ -10,5 +10,5 @@ Provides subcommands for:
 - gauss status         - Show status of all components
 """
 
-__version__ = "0.2.1"
-__release_date__ = "2026.3.26"
+__version__ = "0.2.2"
+__release_date__ = "2026.4.5"

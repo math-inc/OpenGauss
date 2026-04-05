@@ -53,7 +53,8 @@ assert_exists "$HOME/.local/bin/gauss"
 grep -F "Start immediately:" "$INSTALL_LOG" >/dev/null || die "expected installer summary to show the direct gauss path"
 grep -F "$HOME/.local/bin/gauss" "$INSTALL_LOG" >/dev/null || die "expected installer summary to print the linked gauss path"
 grep -F "Start Options:" "$INSTALL_LOG" >/dev/null || die "expected installer summary to list post-install start options"
-grep -F "/start" "$INSTALL_LOG" >/dev/null || die "expected installer summary to mention /start"
+grep -F "/chat" "$INSTALL_LOG" >/dev/null || die "expected installer summary to mention /chat"
+grep -F "/managed-chat" "$INSTALL_LOG" >/dev/null || die "expected installer summary to mention /managed-chat"
 grep -F "gauss-open-session" "$INSTALL_LOG" >/dev/null || die "expected installer summary to mention gauss-open-session"
 grep -F "gauss-open-guide" "$INSTALL_LOG" >/dev/null || die "expected installer summary to mention gauss-open-guide"
 grep -F "cannot change PATH in the shell that launched the installer." "$INSTALL_LOG" >/dev/null || die "expected installer summary to explain current-shell PATH behavior"
@@ -90,8 +91,8 @@ assert_exists "$GAUSS_HOME/config.yaml"
 assert_exists "$GAUSS_HOME/install-root"
 assert_exists "$GAUSS_HOME/guide/index.html"
 grep -F "Start Here" "$GAUSS_HOME/guide/index.html" >/dev/null || die "expected generated guide to include Start Here"
-grep -F "/start" "$GAUSS_HOME/guide/index.html" >/dev/null || die "expected generated guide to mention /start"
 grep -F "/chat" "$GAUSS_HOME/guide/index.html" >/dev/null || die "expected generated guide to mention /chat"
+grep -F "/managed-chat" "$GAUSS_HOME/guide/index.html" >/dev/null || die "expected generated guide to mention /managed-chat"
 grep -F "If You Opened This In Morph" "$GAUSS_HOME/guide/index.html" >/dev/null || die "expected generated guide to include Morph guidance"
 if grep -F "gauss-use-claude-login" "$GAUSS_HOME/guide/index.html" >/dev/null; then
     die "expected generated guide to avoid login-helper clutter"
@@ -188,8 +189,9 @@ printf '%s\n' "$SUMMARY_OUTPUT"
 [[ "$SUMMARY_OUTPUT" == *"Main chat: ready."* ]] || die "expected ready main-chat summary"
 [[ "$SUMMARY_OUTPUT" == *"$WORKSPACE_DIR"* ]] || die "expected workspace path in launcher summary"
 [[ "$SUMMARY_OUTPUT" == *"/chat"* ]] || die "expected launcher summary to mention /chat"
+[[ "$SUMMARY_OUTPUT" == *"/managed-chat"* ]] || die "expected launcher summary to mention /managed-chat"
 [[ "$SUMMARY_OUTPUT" == *"gauss-open-guide"* ]] || die "expected launcher summary to mention gauss-open-guide"
-[[ "$SUMMARY_OUTPUT" == *"begins with /start"* ]] || die "expected launcher summary to mention automatic /start"
+[[ "$SUMMARY_OUTPUT" == *"opens Gauss directly at the top level"* ]] || die "expected launcher summary to mention direct top-level launch"
 if [[ "$SUMMARY_OUTPUT" == *"Staged keys:"* ]]; then
     die "expected launcher summary to avoid staged-key details"
 fi
@@ -225,11 +227,51 @@ PY
 NO_PROVIDER_SUMMARY="$(gauss-launch-session --print-summary)"
 printf '%s\n' "$NO_PROVIDER_SUMMARY"
 [[ "$NO_PROVIDER_SUMMARY" == *"Main chat: needs setup."* ]] || die "expected missing-provider launcher summary"
-[[ "$NO_PROVIDER_SUMMARY" == *"/chat opens the configured managed backend chat session"* ]] || die "expected provider notes to mention managed /chat"
-[[ "$NO_PROVIDER_SUMMARY" == *"run gauss setup first and then leave you in a shell"* ]] || die "expected missing-provider summary to mention setup fallback"
-grep -F "GAUSS_FORCE_FIRST_TIME_SETUP=1 gauss setup || true" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected launcher to restore first-run setup fallback when no provider is staged"
-grep -F "gauss --startup-input /start" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected launcher to auto-start gauss with /start"
-grep -F "exec bash -i" "$HOME/.local/bin/gauss-launch-session" >/dev/null || die "expected interactive shell fallback when no provider is staged"
+[[ "$NO_PROVIDER_SUMMARY" == *"/chat keeps you in Gauss and enables inline onboarding chat"* ]] || die "expected provider notes to mention inline /chat"
+[[ "$NO_PROVIDER_SUMMARY" == *"/managed-chat opens the configured managed backend child session"* ]] || die "expected provider notes to mention managed child session"
+[[ "$NO_PROVIDER_SUMMARY" == *"opens Gauss directly at the top level."* ]] || die "expected missing-provider summary to mention direct gauss launch"
+[[ "$NO_PROVIDER_SUMMARY" == *"direct Gauss chat/model commands stay disabled until you run gauss setup."* ]] || die "expected missing-provider summary to mention deferred provider setup"
+if grep -F "gauss --startup-input /start" "$HOME/.local/bin/gauss-launch-session" >/dev/null; then
+    die "expected launcher to stop auto-injecting /start"
+fi
+if grep -F "gauss setup" "$HOME/.local/bin/gauss-launch-session" >/dev/null; then
+    die "expected launcher to avoid forcing gauss setup when no provider is staged"
+fi
+if grep -F "exec bash -i" "$HOME/.local/bin/gauss-launch-session" >/dev/null; then
+    die "expected launcher to avoid shell fallback when no provider is staged"
+fi
+
+echo "==> Verifying no-provider launcher enters gauss directly"
+FAKE_BIN="$(mktemp -d)"
+LAUNCH_LOG="$(mktemp)"
+cat >"$FAKE_BIN/gauss" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s|%s\n' "$#" "$*" >>"$GAUSS_LAUNCH_LOG"
+if [ "$#" -eq 0 ]; then
+    exit 0
+fi
+printf 'unexpected gauss args: %s\n' "$*" >&2
+exit 99
+EOF
+chmod +x "$FAKE_BIN/gauss"
+if ! GAUSS_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKE_BIN:$PATH" timeout 15s python3 - <<'PY'
+import os
+import pty
+import sys
+
+status = pty.spawn(["gauss-launch-session"])
+if hasattr(os, "waitstatus_to_exitcode"):
+    status = os.waitstatus_to_exitcode(status)
+sys.exit(status)
+PY
+then
+    die "expected no-provider launcher to reach gauss directly"
+fi
+if grep -Fx "setup" "$LAUNCH_LOG" >/dev/null; then
+    die "expected launcher to skip gauss setup before launching gauss"
+fi
+grep -Fx "0|" "$LAUNCH_LOG" >/dev/null || die "expected launcher to enter gauss without startup-input injection"
 mv "$GAUSS_HOME/.env.backup" "$GAUSS_HOME/.env"
 
 echo "==> Verifying Lean bootstrap failures surface useful diagnostics"

@@ -893,9 +893,10 @@ This Lean workspace is prewarmed and already registered as the active Gauss proj
 Quickstart:
 1. Run `gauss-open-guide` if you want the plain-language walkthrough first.
 2. Run `gauss-open-session` for the batteries-included launcher, or `gauss` directly.
-3. Use `/chat` if you want the configured managed backend chat session before choosing a Lean workflow.
-4. Then use `/prove`, `/review`, `/draft`, `/autoprove`, `/formalize`, `/autoformalize`, or `/swarm`.
-5. Keep paper notes, extracted statements, and scratch proofs in this project.
+3. Use `/chat` if you want inline onboarding or plain-language help before choosing a Lean workflow.
+4. Use `/managed-chat` if you specifically want the configured managed backend child session.
+5. Then use `/prove`, `/review`, `/draft`, `/autoprove`, `/formalize`, `/autoformalize`, or `/swarm`.
+6. Keep paper notes, extracted statements, and scratch proofs in this project.
 TXT
         log_success "Created $WORKSPACE_DIR/PAPER.md"
     else
@@ -1138,20 +1139,20 @@ guide_html = f"""<!DOCTYPE html>
     <a href="https://github.com/math-inc/OpenGauss" target="_blank" rel="noreferrer">Open repo</a>
   </header>
   <section class="hero">
-    <p>You do not need to understand MCP, marketplace plugins, or agent orchestration to use Open Gauss. If you just want orientation first, start the CLI and type <code>/start</code>. If you want the configured managed backend chat session first, type <code>/chat</code>. If you already have a Lean repo, use <code>/project init</code>. If you want a new repo, use <code>/project create &lt;path&gt; --template-source &lt;template-or-git-url&gt;</code>.</p>
+    <p>You do not need to understand MCP, marketplace plugins, or agent orchestration to use Open Gauss. If you just want orientation or plain-language help in the current session, start the CLI and type <code>/chat</code>. If you want the configured managed backend child session instead, type <code>/managed-chat</code>. If you already have a Lean repo, use <code>/project init</code>. If you want a new repo, use <code>/project create &lt;path&gt; --template-source &lt;template-or-git-url&gt;</code>.</p>
   </section>
   <section class="callout">
     <strong>30-second version</strong>
     <ul>
-      <li><strong>Morph</strong>: claim or save the session early if Morph offers it, then use <code>gauss-open-guide</code> or <code>/start</code>.</li>
-      <li><strong>Local install</strong>: run <code>gauss-open-guide</code> or <code>gauss</code>, then start with <code>/start</code>, <code>/chat</code>, or <code>/project init</code>.</li>
+      <li><strong>Morph</strong>: claim or save the session early if Morph offers it, then use <code>gauss-open-guide</code>, <code>gauss</code>, or <code>/chat</code>.</li>
+      <li><strong>Local install</strong>: run <code>gauss-open-guide</code> or <code>gauss</code>, then start with <code>/chat</code>, <code>/project init</code>, or <code>/project create</code>.</li>
       <li><strong>Lean work starts after project selection</strong>: use <code>/prove</code>, <code>/review</code>, <code>/draft</code>, or <code>/autoprove</code> once a project is active.</li>
     </ul>
   </section>
   <section class="grid">
     <div class="card">
       <strong>Use These First</strong>
-      <p><code>gauss-open-guide</code><br><code>gauss</code><br><code>/start</code><br><code>/chat</code><br><code>/project init</code></p>
+      <p><code>gauss-open-guide</code><br><code>gauss</code><br><code>/chat</code><br><code>/project init</code><br><code>/managed-chat</code></p>
     </div>
     <div class="card">
       <strong>If You Opened This In Morph</strong>
@@ -1178,15 +1179,15 @@ guide_html = f"""<!DOCTYPE html>
     <h2>Start Here</h2>
     <ol>
       <li>Run <code>gauss</code>.</li>
-      <li>If you want a guided first step, type <code>/start</code>.</li>
-      <li>If you want the configured managed backend chat session first, type <code>/chat</code>.</li>
+      <li>If you want a guided first step or plain-language help in the current session, type <code>/chat</code>.</li>
+      <li>If you want the configured managed backend child session first, type <code>/managed-chat</code>.</li>
       <li>If you already have a Lean repo, type <code>/project init</code> inside it.</li>
       <li>If you need a new Lean repo, type <code>/project create &lt;path&gt; --template-source &lt;template-or-git-url&gt;</code>.</li>
       <li>After that, use <code>/prove</code>, <code>/review</code>, <code>/draft</code>, or <code>/autoprove</code>.</li>
     </ol>
 
     <h2>Useful First Questions</h2>
-    <div class="code-block">/start
+    <div class="code-block">/chat
 /chat I am a mathematician new to Open Gauss. What should I do first?
 /chat What does /project init do?
 /prove Show me how to prove that 1 + 1 = 2 in Lean.</div>
@@ -1468,12 +1469,10 @@ if [ "${1:-}" = "--print-summary" ]; then
 fi
 
 main_chat_status="needs setup."
-launcher_behavior="Because no main chat provider is staged, this launcher will run gauss setup first and then leave you in a shell."
-launch_gauss=0
-if provider_status="$(gauss-configure-main-provider auto 2>&1)"; then
+launcher_behavior="This launcher opens Gauss directly at the top level. Use /chat if you want inline onboarding or plain-language help before choosing a project. Because no main chat provider is staged yet, direct Gauss chat/model commands stay disabled until you run gauss setup."
+if gauss-configure-main-provider auto >/dev/null 2>&1; then
   main_chat_status="ready."
-  launcher_behavior="This launcher opens Gauss automatically and begins with /start."
-  launch_gauss=1
+  launcher_behavior="This launcher opens Gauss directly at the top level. Use /chat if you want inline onboarding or plain-language help before choosing a project."
 else
   :
 fi
@@ -1494,7 +1493,6 @@ Main chat: ${main_chat_status}
 Start here:
   gauss-open-guide
   gauss
-  /start
   /chat
   /project init
   /project use <path>
@@ -1510,8 +1508,8 @@ Lean workflows:
   /swarm
 
 Notes:
-  /start keeps you in Gauss and enables inline onboarding chat before project selection.
-  /chat opens the configured managed backend chat session and returns you to Gauss when it exits.
+  /chat keeps you in Gauss and enables inline onboarding chat before project selection.
+  /managed-chat opens the configured managed backend child session and returns you to Gauss when it exits.
   Run gauss setup later if you want to review or change providers and other settings.
   $launcher_behavior
   PROMPT_TOOLKIT_NO_CPR=1 is enabled to avoid CPR warnings inside tmux.
@@ -1525,17 +1523,10 @@ fi
 
 cd "$WORKSPACE_DIR"
 if [ -t 0 ] && [ -t 1 ]; then
-  if [ "$launch_gauss" -eq 1 ]; then
-    exec gauss --startup-input /start "$@"
-  fi
-  GAUSS_FORCE_FIRST_TIME_SETUP=1 gauss setup || true
-  exec bash -i
+  exec gauss "$@"
 fi
-if [ "$launch_gauss" -eq 1 ]; then
-  gauss --startup-input /start "$@" || true
-  exit 0
-fi
-exit 1
+gauss "$@" || true
+exit 0
 """,
     "gauss-open-session": """#!/usr/bin/env bash
 set -euo pipefail
@@ -1623,7 +1614,7 @@ run_post_install_self_check() {
     log_info "Running post-install verification..."
 
     local version_output
-    if ! version_output="$("$GAUSS_BIN" --version 2>&1)"; then
+    if ! version_output="$(GAUSS_SKIP_UPDATE_CHECK=1 "$GAUSS_BIN" --version 2>&1)"; then
         log_error "Gauss CLI verification failed."
         printf '%s\n' "$version_output" >&2
         exit 1
@@ -1713,8 +1704,8 @@ print_summary() {
     echo "  5. Review settings:     gauss setup"
     echo
     printf '%b%s%b\n' "${CYAN}${BOLD}" "Start Options:" "${NC}"
-    echo "  /start               # turn on onboarding mode and show the first steps"
-    echo "  /chat                # open the configured managed backend chat session before choosing a project"
+    echo "  /chat                # turn on onboarding mode and plain-language chat in the current session"
+    echo "  /managed-chat        # open the configured managed backend child session"
     echo "  /project init        # register the current Lean repo as the active project"
     echo "  /project create ...  # create a new Lean project from a template"
     echo "  gauss                # direct CLI launch in this terminal"
@@ -1734,7 +1725,7 @@ print_summary() {
         echo "  - Verified managed /prove staging in: $MANAGED_SELF_CHECK_STATUS."
     fi
     echo "  - The local guide is written to $GUIDE_DIR/index.html."
-    echo "  - If Open Gauss feels intimidating, start with /start for inline onboarding or /chat for managed backend chat."
+    echo "  - If Open Gauss feels intimidating, start with /chat for inline onboarding or /managed-chat for the child-session handoff."
     echo "  - Use gauss setup later if you want to review providers or other settings."
     echo "  - No Morph iframe is exposed automatically; use gauss-open-guide if you want the local guide in a browser."
     echo "  - No tmux session is opened during install; use gauss-open-session when you want the workflow launcher."

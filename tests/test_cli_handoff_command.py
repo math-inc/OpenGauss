@@ -347,11 +347,11 @@ def test_project_lock_blocks_workflow_commands_before_project_selection():
     rendered = "\n".join(call.args[0] for call in cli_obj.console.print.call_args_list)
     assert "Gauss needs an active project before `/prove`." in rendered
     assert "/project init" in rendered
-    assert "/start" in rendered
     assert "/chat" in rendered
+    assert "/managed-chat" in rendered
 
 
-def test_chat_command_dispatches_to_managed_interactive_runner():
+def test_managed_chat_command_dispatches_to_managed_interactive_runner():
     cli_obj = _make_cli()
     cli_obj._app = object()
     task = SimpleNamespace(task_id="chat-001", status="running", pty_master_fd=99)
@@ -369,7 +369,7 @@ def test_chat_command_dispatches_to_managed_interactive_runner():
     with patch.object(cli_mod, "resolve_managed_chat_request", return_value=plan), \
          patch.object(cli_mod, "SwarmManager", return_value=swarm), \
          patch.object(cli_obj, "_attach_to_swarm_task") as mock_attach:
-        assert cli_obj.process_command("/chat") is True
+        assert cli_obj.process_command("/managed-chat") is True
 
     swarm.spawn_interactive.assert_called_once()
     kwargs = swarm.spawn_interactive.call_args.kwargs
@@ -378,13 +378,13 @@ def test_chat_command_dispatches_to_managed_interactive_runner():
     assert kwargs["argv"] == ["/usr/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "prompt"]
     assert kwargs["cwd"] == "/tmp"
     assert kwargs["workflow_kind"] == "chat"
-    assert kwargs["workflow_command"] == "/chat"
+    assert kwargs["workflow_command"] == "/managed-chat"
     assert kwargs["backend_name"] == "codex"
     assert kwargs["env"]["CODEX_HOME"] == "/tmp/codex-home"
     mock_attach.assert_called_once_with("chat-001")
 
 
-def test_chat_command_with_payload_forwards_startup_message():
+def test_managed_chat_command_with_payload_forwards_startup_message():
     cli_obj = _make_cli()
     cli_obj._app = object()
     task = SimpleNamespace(task_id="chat-002", status="running", pty_master_fd=99)
@@ -402,7 +402,7 @@ def test_chat_command_with_payload_forwards_startup_message():
     with patch.object(cli_mod, "resolve_managed_chat_request", return_value=plan) as mock_resolve, \
          patch.object(cli_mod, "SwarmManager", return_value=swarm), \
          patch.object(cli_obj, "_attach_to_swarm_task") as mock_attach:
-        assert cli_obj.process_command("/chat Explain what /project init does") is True
+        assert cli_obj.process_command("/managed-chat Explain what /project init does") is True
 
     mock_resolve.assert_called_once_with(
         "Explain what /project init does",
@@ -417,57 +417,81 @@ def test_chat_command_with_payload_forwards_startup_message():
     mock_attach.assert_called_once_with("chat-002")
 
 
-def test_chat_status_explains_new_managed_session_semantics():
-    cli_obj = _make_cli()
-    cli_obj._app = object()
-    swarm = MagicMock()
-
-    with patch.object(cli_mod, "SwarmManager", return_value=swarm), \
-         patch.object(cli_obj, "_active_managed_backend_name", return_value="codex"):
-        assert cli_obj.process_command("/chat status") is True
-
-    swarm.spawn_interactive.assert_not_called()
-    rendered = "\n".join(call.args[0] for call in cli_obj.console.print.call_args_list)
-    assert "managed backend chat session" in rendered
-    assert "codex" in rendered
-    assert "/autoformalize-backend" in rendered
-    assert "/start" in rendered
-
-
-def test_start_command_enables_chat_mode_and_shows_first_steps():
+def test_chat_command_enables_chat_mode_and_shows_first_steps():
     cli_obj = _make_cli()
     cli_obj._app = object()
     cli_obj._project_state = MagicMock(
         return_value=(None, "ambient", "No active Gauss project found.")
     )
 
-    assert cli_obj.process_command("/start") is True
+    assert cli_obj.process_command("/chat") is True
 
     assert cli_obj._chat_mode_enabled is True
     rendered = "\n".join(call.args[0] for call in cli_obj.console.print.call_args_list)
-    assert "`/start` is on." in rendered
+    assert "`/chat` is on." in rendered
     assert "/project use <path>" in rendered
+    assert "/managed-chat" in rendered
     assert "/prove" in rendered
 
 
-def test_start_command_with_payload_queues_plain_message():
+def test_chat_command_with_payload_queues_plain_message():
     cli_obj = _make_cli()
     cli_obj._app = object()
     cli_obj._pending_input = MagicMock()
 
-    assert cli_obj.process_command("/start I have a theorem but no project yet") is True
+    assert cli_obj.process_command("/chat I have a theorem but no project yet") is True
 
     assert cli_obj._chat_mode_enabled is True
     cli_obj._pending_input.put.assert_called_once_with("I have a theorem but no project yet")
 
 
+def test_chat_status_reports_inline_chat_mode_state():
+    cli_obj = _make_cli()
+    cli_obj._app = object()
+
+    assert cli_obj.process_command("/chat status") is True
+
+    rendered = "\n".join(call.args[0] for call in cli_obj.console.print.call_args_list)
+    assert "`/chat` is off." in rendered
+    assert "/chat off" in rendered
+    assert "/managed-chat" in rendered
+
+
+def test_managed_chat_status_explains_child_session_semantics():
+    cli_obj = _make_cli()
+    cli_obj._app = object()
+    swarm = MagicMock()
+
+    with patch.object(cli_mod, "SwarmManager", return_value=swarm), \
+         patch.object(cli_obj, "_active_managed_backend_name", return_value="codex"):
+        assert cli_obj.process_command("/managed-chat status") is True
+
+    swarm.spawn_interactive.assert_not_called()
+    rendered = "\n".join(call.args[0] for call in cli_obj.console.print.call_args_list)
+    assert "managed backend child session" in rendered
+    assert "codex" in rendered
+    assert "/autoformalize-backend" in rendered
+    assert "/chat" in rendered
+
+
+def test_start_alias_enables_same_inline_chat_mode():
+    cli_obj = _make_cli()
+    cli_obj._app = object()
+
+    assert cli_obj.process_command("/start") is True
+
+    assert cli_obj._chat_mode_enabled is True
+    rendered = "\n".join(call.args[0] for call in cli_obj.console.print.call_args_list)
+    assert "`/chat` is on." in rendered
+
+
 def test_misspelled_onboarding_slash_command_autocorrects():
     cli_obj = _make_cli()
     cli_obj._app = object()
-    with patch.object(cli_obj, "_handle_start_command") as mock_start:
+    with patch.object(cli_obj, "_handle_chat_command") as mock_chat:
         assert cli_obj.process_command("/strat") is True
 
-    mock_start.assert_called_once_with("/start")
+    mock_chat.assert_called_once_with("/chat")
 
 
 def test_handoff_alias_rewrites_to_autoformalize():

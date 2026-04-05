@@ -20,8 +20,7 @@ from prompt_toolkit.completion import Completer, Completion
 # Commands organized by category for better help display
 COMMANDS_BY_CATEGORY = {
     "Start Here": {
-        "/start": "Show the first-step guide and enable plain-language chat mode",
-        "/chat": "Open the configured managed backend chat session before choosing a Gauss project",
+        "/chat": "Show the first-step guide and enable plain-language chat mode",
         "/project": "Create, convert, inspect, or switch the active Gauss project",
     },
     "Workflow": {
@@ -38,6 +37,7 @@ COMMANDS_BY_CATEGORY = {
         "/swarm": "Show workflow agents · /swarm attach <id> · /swarm cancel <id>",
     },
     "Session": {
+        "/managed-chat": "Open the configured managed backend child session and return to Gauss when it exits",
         "/new": "Start a new session (fresh session ID + history)",
         "/reset": "Start a new session (alias for /new)",
         "/clear": "Clear screen and start a new session",
@@ -75,8 +75,8 @@ for category_commands in COMMANDS_BY_CATEGORY.values():
 
 _FRIENDLY_ENTRY_ALIASES = {
     "chat": "/chat",
-    "start": "/start",
-    "begin": "/start",
+    "start": "/chat",
+    "begin": "/chat",
     "project": "/project",
     "help": "/help",
 }
@@ -93,7 +93,7 @@ _FRIENDLY_ENTRY_PHRASES = (
 
 _FRIENDLY_FUZZY_TARGETS = {
     "chat": "/chat",
-    "start": "/start",
+    "start": "/chat",
     "project": "/project",
     "help": "/help",
 }
@@ -113,7 +113,7 @@ def rewrite_friendly_entry_command(command: str) -> str | None:
 
     lowered = " ".join(text.lower().split())
     if lowered in _FRIENDLY_ENTRY_PHRASES:
-        return "/start"
+        return "/chat"
 
     parts = text.split(maxsplit=1)
     token = _normalize_entry_token(parts[0])
@@ -141,6 +141,8 @@ def rewrite_friendly_slash_command(command: str) -> str | None:
     parts = text.split(maxsplit=1)
     token = parts[0].strip().lower()
     remainder = parts[1].strip() if len(parts) > 1 else ""
+    if token == "/start":
+        return None
     if token in COMMANDS:
         return None
 

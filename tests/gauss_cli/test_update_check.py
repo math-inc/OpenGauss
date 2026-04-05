@@ -80,6 +80,27 @@ def test_check_for_updates_no_git_dir(tmp_path):
         banner.__file__ = original
 
 
+def test_check_for_updates_can_be_disabled_via_env(tmp_path):
+    """Installer and CI callers can skip the update probe entirely."""
+    from gauss_cli.banner import check_for_updates
+
+    repo_dir = tmp_path / "checkout"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    (tmp_path / "install-root").write_text(str(repo_dir))
+
+    with patch.dict(
+        "os.environ",
+        {"GAUSS_HOME": str(tmp_path), "GAUSS_SKIP_UPDATE_CHECK": "1"},
+        clear=False,
+    ):
+        with patch("gauss_cli.banner.subprocess.run") as mock_run:
+            result = check_for_updates()
+
+    assert result is None
+    mock_run.assert_not_called()
+
+
 def test_check_for_updates_fallback_to_project_root():
     """Dev install: falls back to Path(__file__).parent.parent when GAUSS_HOME has no git repo."""
     import gauss_cli.banner as banner

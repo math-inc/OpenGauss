@@ -549,8 +549,8 @@ class TestBuildSystemPrompt:
 
     def test_includes_open_gauss_entry_workflow_guidance(self, agent):
         prompt = agent._build_system_prompt()
-        assert "point them to /start if they want inline orientation or plain-language help" in prompt
-        assert "point them to /chat if they want a managed Claude Code or Codex chat session" in prompt
+        assert "point them to /chat if they want inline orientation or plain-language help" in prompt
+        assert "point them to /managed-chat if they want a managed Claude Code or Codex child session" in prompt
         assert "point them to /project" in prompt
         assert "/autoprove The de Bruijn - Erdos theorem" in prompt
         assert "Ctrl-] detaches and returns them to the main Gauss session" in prompt

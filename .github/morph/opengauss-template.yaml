@@ -1,5 +1,5 @@
 name: Open Gauss Batteries Included Devbox
-description: Installer-driven Open Gauss template that uses the current checkout when run locally and otherwise clones math-inc/OpenGauss, runs the internal installer, exposes the local guide, and opens a ready Gauss session.
+description: Installer-driven Open Gauss template that uses the current checkout when run locally and otherwise clones math-inc/OpenGauss, runs the internal installer, stages optional provider keys, exposes the local guide, and opens a ready Gauss session.
 steps:
   - id: bootstrap-installer-runtime
     title: Prepare Open Gauss Installer Runtime
@@ -63,6 +63,90 @@ steps:
       ./scripts/install-internal.sh --with-workspace --noninteractive
       . "$HOME/.opengauss-template/runtime.env"
       "$HOME/.local/bin/gauss-launch-session" --print-summary || true
+  - id: optional-openrouter
+    title: Optionally Stage OPENROUTER_API_KEY
+    type: exportSecret
+    name: OPENROUTER_API_KEY
+    optional: true
+    run: |
+      set -euo pipefail
+      . "$HOME/.opengauss-template/runtime.env"
+      mkdir -p "$GAUSS_HOME"
+      touch "$GAUSS_HOME/.env"
+      python3 - <<'PY'
+      from pathlib import Path
+      import os
+
+      env_path = Path(os.environ["GAUSS_HOME"]) / ".env"
+      lines = []
+      if env_path.exists():
+          lines = [line for line in env_path.read_text().splitlines() if line and not line.startswith("OPENROUTER_API_KEY=")]
+      value = os.environ.get("OPENROUTER_API_KEY")
+      if not value:
+          raise SystemExit(0)
+      lines.append("OPENROUTER_API_KEY=" + value)
+      env_path.write_text("\n".join(lines) + "\n")
+      PY
+  - id: optional-openai
+    title: Optionally Stage OPENAI_API_KEY
+    type: exportSecret
+    name: OPENAI_API_KEY
+    optional: true
+    run: |
+      set -euo pipefail
+      . "$HOME/.opengauss-template/runtime.env"
+      mkdir -p "$GAUSS_HOME"
+      touch "$GAUSS_HOME/.env"
+      python3 - <<'PY'
+      from pathlib import Path
+      import os
+
+      env_path = Path(os.environ["GAUSS_HOME"]) / ".env"
+      lines = []
+      if env_path.exists():
+          lines = [line for line in env_path.read_text().splitlines() if line and not line.startswith("OPENAI_API_KEY=")]
+      value = os.environ.get("OPENAI_API_KEY")
+      if not value:
+          raise SystemExit(0)
+      lines.append("OPENAI_API_KEY=" + value)
+      env_path.write_text("\n".join(lines) + "\n")
+      PY
+  - id: optional-anthropic
+    title: Optionally Stage ANTHROPIC_API_KEY
+    type: exportSecret
+    name: ANTHROPIC_API_KEY
+    optional: true
+    run: |
+      set -euo pipefail
+      . "$HOME/.opengauss-template/runtime.env"
+      mkdir -p "$GAUSS_HOME"
+      touch "$GAUSS_HOME/.env"
+      python3 - <<'PY'
+      from pathlib import Path
+      import os
+
+      env_path = Path(os.environ["GAUSS_HOME"]) / ".env"
+      lines = []
+      if env_path.exists():
+          lines = [line for line in env_path.read_text().splitlines() if line and not line.startswith("ANTHROPIC_API_KEY=")]
+      value = os.environ.get("ANTHROPIC_API_KEY")
+      if not value:
+          raise SystemExit(0)
+      lines.append("ANTHROPIC_API_KEY=" + value)
+      env_path.write_text("\n".join(lines) + "\n")
+      PY
+  - id: finalize-provider-selection
+    title: Apply Main Provider Selection
+    type: command
+    run: |
+      set -euo pipefail
+      . "$HOME/.opengauss-template/runtime.env"
+      if [ -f "$GAUSS_HOME/.env" ]; then
+        set -a
+        . "$GAUSS_HOME/.env"
+        set +a
+      fi
+      "$HOME/.local/bin/gauss-configure-main-provider" auto || true
   - id: start-guide-server
     title: Start Guide Iframe Server
     type: command

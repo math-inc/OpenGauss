@@ -110,8 +110,11 @@ class MorphClient:
             },
         )
 
-    def cache_template(self, template_id: str) -> dict:
-        return self._request("POST", f"/api/templates/{template_id}/cache", {})
+    def cache_template(self, template_id: str, *, force: bool = False) -> dict:
+        payload: dict[str, bool] = {}
+        if force:
+            payload["force"] = True
+        return self._request("POST", f"/api/templates/{template_id}/cache", payload)
 
     def fetch_template(self, template_id: str) -> dict:
         return self._request("GET", f"/api/templates/{template_id}")
@@ -131,6 +134,17 @@ def parse_tags(raw_tags: str | None) -> list[str]:
     if not raw_tags:
         return []
     return [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
+
+
+def parse_bool(raw_value: str | None, *, default: bool) -> bool:
+    if raw_value is None or not raw_value.strip():
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise PublishError(f"Invalid boolean value: {raw_value!r}")
 
 
 def wait_for_ready(client: MorphClient, template_id: str, *, timeout_seconds: int, poll_seconds: float) -> dict:
@@ -193,6 +207,7 @@ def publish_template(
     template_path: Path,
     base_snapshot_id: str | None = None,
     tags: list[str] | None = None,
+    force_rebuild: bool = True,
     timeout_seconds: int = 1800,
     poll_seconds: float = 5.0,
 ) -> dict:
@@ -212,7 +227,7 @@ def publish_template(
         raise PublishError(f"Create template response did not include an id: {json.dumps(created)}")
     log(f"created_template {template_id}")
 
-    cache_result = client.cache_template(template_id)
+    cache_result = client.cache_template(template_id, force=force_rebuild)
     cache_run_id = cache_result.get("run_id") or cache_result.get("runId")
     if cache_run_id:
         log(f"cache_started {cache_run_id}")
@@ -274,6 +289,7 @@ def main() -> int:
             template_path=Path(env("TEMPLATE_FILE")),
             base_snapshot_id=os.environ.get("TEMPLATE_BASE_SNAPSHOT_ID", "").strip() or None,
             tags=parse_tags(os.environ.get("TEMPLATE_TAGS")),
+            force_rebuild=parse_bool(os.environ.get("TEMPLATE_FORCE_REBUILD"), default=True),
             timeout_seconds=int(os.environ.get("TEMPLATE_TIMEOUT_SECONDS", "1800")),
             poll_seconds=float(os.environ.get("TEMPLATE_POLL_SECONDS", "5")),
         )

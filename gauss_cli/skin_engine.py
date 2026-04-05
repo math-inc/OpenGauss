@@ -185,7 +185,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "branding": {
             "agent_name": "Gauss",
-            "welcome": "Welcome to Gauss! Type /start for inline onboarding, /chat for managed backend chat, or /help for commands.",
+            "welcome": "Welcome to Gauss! Type /chat for inline onboarding, /project for project setup, or /help for commands.",
             "status_glyph": "@",
             "goodbye": "Goodbye! @",
             "response_label": " ∑ Gauss ",
@@ -282,7 +282,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "spinner": {},
         "branding": {
             "agent_name": "Gauss",
-            "welcome": "Welcome to Gauss! Type /start for inline onboarding, /chat for managed backend chat, or /help for commands.",
+            "welcome": "Welcome to Gauss! Type /chat for inline onboarding, /project for project setup, or /help for commands.",
             "status_glyph": "@",
             "goodbye": "Goodbye! @",
             "response_label": " ∑ Gauss ",
@@ -314,7 +314,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "spinner": {},
         "branding": {
             "agent_name": "Gauss",
-            "welcome": "Welcome to Gauss! Type /start for inline onboarding, /chat for managed backend chat, or /help for commands.",
+            "welcome": "Welcome to Gauss! Type /chat for inline onboarding, /project for project setup, or /help for commands.",
             "status_glyph": "@",
             "goodbye": "Goodbye! @",
             "response_label": " ∑ Gauss ",

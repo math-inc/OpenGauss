@@ -1730,7 +1730,25 @@ class GaussCLI:
         resolved_provider = runtime.get("provider", "openrouter")
         resolved_api_mode = runtime.get("api_mode", self.api_mode)
         if not isinstance(api_key, str) or not api_key:
-            self.console.print("[bold red]Provider resolver returned an empty API key.[/]")
+            if resolved_provider in {"openrouter", "custom"}:
+                message = (
+                    "No main interactive provider is configured yet. "
+                    "Run `gauss setup`, or save `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, "
+                    "or `ANTHROPIC_API_KEY` in `~/.gauss/.env`."
+                )
+            elif resolved_provider == "anthropic":
+                message = (
+                    "No Anthropic credentials are available for chat. "
+                    "Run `gauss setup`, `claude auth login`, or save `ANTHROPIC_API_KEY`."
+                )
+            elif resolved_provider == "openai-codex":
+                message = (
+                    "No Codex credentials are available for chat. "
+                    "Run `gauss setup`, `codex login`, or save `OPENAI_API_KEY`."
+                )
+            else:
+                message = "Provider resolver returned an empty API key."
+            self.console.print(f"[bold red]{message}[/]")
             return False
         if not isinstance(base_url, str) or not base_url:
             self.console.print("[bold red]Provider resolver returned an empty base URL.[/]")
@@ -2423,7 +2441,7 @@ class GaussCLI:
             _cprint(f"\n  {_DIM}Active project: {project_summary}{_RST}")
         else:
             _cprint(
-                f"\n  {_DIM}No active project — use /start for inline onboarding, /chat for managed backend chat, or /project init, "
+                f"\n  {_DIM}No active project — use /chat for inline onboarding, /managed-chat for a managed backend child session, or /project init, "
                 f"/project convert, /project create <path>, or /project use <path>.{_RST}"
             )
 
@@ -2440,7 +2458,7 @@ class GaussCLI:
                 )
 
         _cprint(
-            f"\n  {_DIM}Tip: Start with /start for inline onboarding or /chat for managed backend chat if you want orientation first. Use /project when you're ready to work in a Lean repo, "
+            f"\n  {_DIM}Tip: Start with /chat for inline onboarding if you want orientation first. Use /managed-chat if you want the configured managed backend child session. Use /project when you're ready to work in a Lean repo, "
             f"then launch /prove, /review, /checkpoint, /refactor, /golf, /draft, /autoprove, /formalize, or /autoformalize.{_RST}"
         )
         _cprint(f"  {_DIM}Multi-line: Alt+Enter for a new line{_RST}")
@@ -3375,8 +3393,9 @@ class GaussCLI:
         """Return whether *command* remains available before project selection."""
         cmd_lower = command.lower().strip()
         allowed_prefixes = (
-            "/start",
             "/chat",
+            "/managed-chat",
+            "/start",
             "/project",
             "/help",
             "/quit",
@@ -3411,8 +3430,8 @@ class GaussCLI:
             f"{prefix} Use /project init, /project convert, /project create <path>, or /project use <path> first.",
         )
         self._print_surface_notice(
-            "[dim]If you only want orientation first, run `/start` for inline onboarding chat or `/chat` for the configured managed backend chat session.[/]",
-            "If you only want orientation first, run /start for inline onboarding chat or /chat for the configured managed backend chat session.",
+            "[dim]If you only want orientation first, run `/chat` for inline onboarding chat or `/managed-chat` for the configured managed backend child session.[/]",
+            "If you only want orientation first, run /chat for inline onboarding chat or /managed-chat for the configured managed backend child session.",
         )
         self._print_surface_notice(
             f"[dim]{detail}[/]",
@@ -3488,7 +3507,7 @@ class GaussCLI:
         except AutoformalizeConfigError:
             return str(active_backend_raw or available[0])
 
-    def _spawn_managed_chat_session(self, payload: str):
+    def _spawn_managed_chat_session(self, payload: str, *, workflow_command: str = "/managed-chat"):
         """Launch a managed provider chat child session and return the task metadata."""
         plan = resolve_managed_chat_request(
             payload,
@@ -3505,13 +3524,68 @@ class GaussCLI:
             cwd=plan.handoff_request.cwd,
             env=plan.handoff_request.env,
             workflow_kind="chat",
-            workflow_command="/chat",
+            workflow_command=workflow_command,
             backend_name=plan.backend_name,
         )
         return task, description, plan.backend_name
 
     def _handle_chat_command(self, cmd: str):
-        """Handle `/chat` by opening the configured managed backend chat session."""
+        """Handle `/chat` by enabling inline top-level chat mode."""
+        parts = cmd.strip().split(maxsplit=1)
+        payload = parts[1].strip() if len(parts) > 1 else ""
+        lowered = payload.lower()
+
+        if lowered == "status":
+            state_label = "on" if self._chat_mode_active() else "off"
+            self._print_surface_notice(
+                f"[dim]`/chat` is {state_label}. When it is on, plain text goes to the main interactive provider in the current Gauss session. "
+                "Use `/chat off` to return to top-level command mode, or `/managed-chat` if you want the configured managed backend child session.[/]",
+                f"`/chat` is {state_label}. When it is on, plain text goes to the main interactive provider in the current Gauss session. "
+                "Use /chat off to return to top-level command mode, or /managed-chat if you want the configured managed backend child session.",
+            )
+            return
+
+        if lowered in {"off", "disable", "stop"}:
+            self._chat_mode_enabled = False
+            self._print_surface_notice(
+                "[dim]`/chat` is off. Plain text stays at the top-level Open Gauss prompt until you run `/chat` again.[/]",
+                "`/chat` is off. Plain text stays at the top-level Open Gauss prompt until you run /chat again.",
+            )
+            return
+
+        if lowered in {"on", "enable", "start"}:
+            payload = ""
+
+        self._chat_mode_enabled = True
+        self._print_surface_notice(
+            "[bold green]`/chat` is on.[/] "
+            "[dim]Plain text now goes to the main interactive provider even without an active Gauss project.[/]",
+            "`/chat` is on. Plain text now goes to the main interactive provider even without an active Gauss project.",
+        )
+        self._print_surface_notice(
+            "[dim]Next: use `/project use <path>` for an existing Lean repo, `/project init` in the current repo, "
+            "`/project create <path> --template-source <template-or-git-url>` for a new one, or `/managed-chat` if you want the configured managed backend child session instead.[/]",
+            "Next: use /project use <path> for an existing Lean repo, /project init in the current repo, /project create <path> --template-source <template-or-git-url> for a new one, or /managed-chat if you want the configured managed backend child session instead.",
+        )
+        self._print_surface_notice(
+            "[dim]When the project is ready, run `/prove`, `/review`, `/draft`, `/autoprove`, or `/swarm`.[/]",
+            "When the project is ready, run /prove, /review, /draft, /autoprove, or /swarm.",
+        )
+        if payload:
+            self._print_surface_notice(
+                "[dim]`/chat` is sending your message to the main interactive provider.[/]",
+                "`/chat` is sending your message to the main interactive provider.",
+            )
+            if hasattr(self, "_pending_input") and hasattr(self._pending_input, "put"):
+                self._pending_input.put(payload)
+            else:
+                self._print_surface_notice(
+                    "[bold yellow]Chat queue is not available in this mode.[/]",
+                    "Chat queue is not available in this mode.",
+                )
+
+    def _handle_managed_chat_command(self, cmd: str):
+        """Handle `/managed-chat` by opening the configured managed backend child session."""
         parts = cmd.strip().split(maxsplit=1)
         payload = parts[1].strip() if len(parts) > 1 else ""
         lowered = payload.lower()
@@ -3519,19 +3593,17 @@ class GaussCLI:
         if lowered == "status":
             active_backend = self._active_managed_backend_name()
             self._print_surface_notice(
-                "[dim]`/chat` opens the configured managed backend chat session "
-                f"(`{active_backend}`). Use `/autoformalize-backend` to switch backends, or `/start` "
-                "for inline onboarding chat in the current Gauss session.[/]",
-                f"`/chat` opens the configured managed backend chat session ({active_backend}). "
-                "Use /autoformalize-backend to switch backends, or /start for inline onboarding chat in the current Gauss session.",
+                "[dim]`/managed-chat` opens the configured managed backend child session "
+                f"(`{active_backend}`). Use `/autoformalize-backend` to switch backends, or `/chat` for inline onboarding in the current Gauss session.[/]",
+                f"`/managed-chat` opens the configured managed backend child session ({active_backend}). "
+                "Use /autoformalize-backend to switch backends, or /chat for inline onboarding in the current Gauss session.",
             )
             return
 
         if lowered in {"off", "disable", "stop"}:
             self._print_surface_notice(
-                "[dim]Inline `/chat` mode has been removed. "
-                "Use `/start` for inline onboarding chat, or run `/chat` to open the managed backend chat session.[/]",
-                "Inline /chat mode has been removed. Use /start for inline onboarding chat, or run /chat to open the managed backend chat session.",
+                "[dim]`/managed-chat` is not a persistent mode. Run `/chat` if you want inline onboarding in the current Gauss session.[/]",
+                "`/managed-chat` is not a persistent mode. Run /chat if you want inline onboarding in the current Gauss session.",
             )
             return
 
@@ -3541,9 +3613,12 @@ class GaussCLI:
         task = None
         description = payload.strip() or "managed chat"
         backend_name = self._active_managed_backend_name()
-        with self._busy_command(self._slow_command_status("/chat")):
+        with self._busy_command(self._slow_command_status("/managed-chat")):
             try:
-                task, description, backend_name = self._spawn_managed_chat_session(payload)
+                task, description, backend_name = self._spawn_managed_chat_session(
+                    payload,
+                    workflow_command="/managed-chat",
+                )
             except (AutoformalizeError, HandoffError) as exc:
                 print(f"(>_<) {exc}")
                 return
@@ -3560,37 +3635,10 @@ class GaussCLI:
         )
 
     def _handle_start_command(self, cmd: str):
-        """Handle `/start` with a short first-step guide and chat-mode enablement."""
-        parts = cmd.strip().split(maxsplit=1)
-        payload = parts[1].strip() if len(parts) > 1 else ""
-
-        self._chat_mode_enabled = True
-        self._print_surface_notice(
-            "[bold green]`/start` is on.[/] "
-            "[dim]Plain text now goes to the main interactive provider even without an active Gauss project.[/]",
-            "`/start` is on. Plain text now goes to the main interactive provider even without an active Gauss project.",
-        )
-        self._print_surface_notice(
-            "[dim]Next: use `/chat` if you want the configured managed backend chat session, `/project use <path>` for an existing Lean repo, "
-            "`/project init` in the current repo, or `/project create <path> --template-source <template-or-git-url>` for a new one.[/]",
-            "Next: use /chat if you want the configured managed backend chat session, /project use <path> for an existing Lean repo, /project init in the current repo, or /project create <path> --template-source <template-or-git-url> for a new one.",
-        )
-        self._print_surface_notice(
-            "[dim]When the project is ready, run `/prove`, `/review`, `/draft`, `/autoprove`, or `/swarm`.[/]",
-            "When the project is ready, run /prove, /review, /draft, /autoprove, or /swarm.",
-        )
-        if payload:
-            self._print_surface_notice(
-                "[dim]`/start` is sending your message to the main interactive provider.[/]",
-                "`/start` is sending your message to the main interactive provider.",
-            )
-            if hasattr(self, "_pending_input") and hasattr(self._pending_input, "put"):
-                self._pending_input.put(payload)
-            else:
-                self._print_surface_notice(
-                    "[bold yellow]Chat queue is not available in this mode.[/]",
-                    "Chat queue is not available in this mode.",
-                )
+        """Compatibility alias for `/chat`."""
+        suffix = cmd.strip()[len("/start"):]
+        forwarded = f"/chat{suffix}" if suffix else "/chat"
+        self._handle_chat_command(forwarded)
 
     def _setup_swarm_completion_callback(self):
         """Wire up a one-time callback so finished swarm tasks notify the TUI."""
@@ -4092,10 +4140,12 @@ class GaussCLI:
         
         if cmd_lower in ("/quit", "/exit", "/q"):
             return False
-        elif cmd_lower == "/start" or cmd_lower.startswith("/start "):
-            self._handle_start_command(cmd_original)
         elif cmd_lower == "/chat" or cmd_lower.startswith("/chat "):
             self._handle_chat_command(cmd_original)
+        elif cmd_lower == "/managed-chat" or cmd_lower.startswith("/managed-chat "):
+            self._handle_managed_chat_command(cmd_original)
+        elif cmd_lower == "/start" or cmd_lower.startswith("/start "):
+            self._handle_start_command(cmd_original)
         elif cmd_lower == "/help":
             self.show_help()
         elif cmd_lower == "/project" or cmd_lower.startswith("/project "):
@@ -6401,10 +6451,10 @@ class GaussCLI:
         try:
             from gauss_cli.skin_engine import get_active_skin
             _welcome_skin = get_active_skin()
-            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Gauss! Type /start for inline onboarding, /chat for managed backend chat, or /help for commands.")
+            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Gauss! Type /chat for inline onboarding, /project for project setup, or /help for commands.")
             _welcome_color = _welcome_skin.get_color("banner_text", "#FFF8DC")
         except Exception:
-            _welcome_text = "Welcome to Gauss! Type /start for inline onboarding, /chat for managed backend chat, or /help for commands."
+            _welcome_text = "Welcome to Gauss! Type /chat for inline onboarding, /project for project setup, or /help for commands."
             _welcome_color = "#FFF8DC"
         self.console.print(f"[{_welcome_color}]{_welcome_text}[/]")
         self.console.print()

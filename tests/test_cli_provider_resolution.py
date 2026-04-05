@@ -162,6 +162,29 @@ def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     assert shell.api_mode == "codex_responses"
 
 
+def test_runtime_resolution_reports_missing_main_provider_clearly(monkeypatch, capsys):
+    cli = _import_cli()
+
+    def _runtime_resolve(**kwargs):
+        return {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "",
+            "source": "env/config",
+        }
+
+    monkeypatch.setattr("gauss_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("gauss_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+
+    shell = cli.GaussCLI(model="gpt-5", compact=True, max_turns=1)
+
+    assert shell._ensure_runtime_credentials() is False
+    output = capsys.readouterr().out
+    assert "No main interactive provider is configured yet." in output
+    assert "gauss setup" in output
+
+
 def test_cli_prefers_config_provider_over_stale_env_override(monkeypatch):
     cli = _import_cli()
 

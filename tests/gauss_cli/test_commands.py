@@ -13,8 +13,8 @@ from gauss_cli.commands import (
 
 # All commands that must be present in the shared COMMANDS dict.
 EXPECTED_COMMANDS = {
-    "/start",
     "/chat",
+    "/managed-chat",
     "/project",
     "/prove",
     "/draft",
@@ -63,8 +63,8 @@ class TestCommands:
     def test_shared_commands_include_project_and_workflow_entries(self):
         """Gauss ships project management plus managed workflow commands."""
         assert COMMANDS["/paste"] == "Check clipboard for an image and attach it"
-        assert COMMANDS["/start"] == "Show the first-step guide and enable plain-language chat mode"
-        assert COMMANDS["/chat"] == "Open the configured managed backend chat session before choosing a Gauss project"
+        assert COMMANDS["/chat"] == "Show the first-step guide and enable plain-language chat mode"
+        assert COMMANDS["/managed-chat"] == "Open the configured managed backend child session and return to Gauss when it exits"
         assert COMMANDS["/project"] == "Create, convert, inspect, or switch the active Gauss project"
         assert COMMANDS["/prove"] == "Spawn a managed backend agent for the guided Lean prove workflow"
         assert COMMANDS["/draft"] == "Spawn a managed backend agent for the Lean draft workflow"
@@ -125,14 +125,15 @@ class TestSlashCommandCompleter:
 
     def test_friendly_entry_rewriter_handles_exact_and_fuzzy_inputs(self):
         assert rewrite_friendly_entry_command("chat explain /project init") == "/chat explain /project init"
-        assert rewrite_friendly_entry_command("start") == "/start"
-        assert rewrite_friendly_entry_command("strat") == "/start"
+        assert rewrite_friendly_entry_command("start") == "/chat"
+        assert rewrite_friendly_entry_command("strat") == "/chat"
         assert rewrite_friendly_entry_command("caht hello") == "/chat hello"
-        assert rewrite_friendly_entry_command("get started") == "/start"
+        assert rewrite_friendly_entry_command("get started") == "/chat"
 
     def test_friendly_slash_rewriter_handles_obvious_typos(self):
-        assert rewrite_friendly_slash_command("/strat") == "/start"
+        assert rewrite_friendly_slash_command("/strat") == "/chat"
         assert rewrite_friendly_slash_command("/caht hello") == "/chat hello"
+        assert rewrite_friendly_slash_command("/start") is None
         assert rewrite_friendly_slash_command("/project use .") is None
 
     # -- skill commands via provider ------------------------------------

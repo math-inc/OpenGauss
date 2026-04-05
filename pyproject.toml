@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gauss-agent"
-version = "0.2.1"
+version = "0.2.2"
 description = "Gauss is a focused Lean autoformalization workspace with a managed Claude Code launcher."
 readme = "README.md"
 requires-python = ">=3.11"
