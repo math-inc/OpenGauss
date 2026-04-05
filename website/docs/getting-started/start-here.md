@@ -16,7 +16,7 @@ If you want OpenGauss to work inside a Lean project, use `/project`.
 
 ## 30-Second Version
 
-- **Morph**: open `morph.new/opengauss-0-2-2`, claim or save the session early if Morph offers that option, run `gauss-open-guide` if the guide is not already open, then start with `/chat`, `/managed-chat`, or `/project init`.
+- **Morph**: open <https://morph.new/opengauss-0-2-2>, claim or save the session early if Morph offers that option, run `gauss-open-guide` if the guide is not already open, then start with `/chat`, `/managed-chat`, or `/project init`.
 - **Local install**: run `./scripts/install.sh`, then `gauss-open-guide` or `gauss`, then start with `/chat`, `/managed-chat`, or `/project init`.
 - **Already have a Lean repo**: `cd` into it, run `gauss`, then `/project init`.
 - **Need a new Lean repo**: run `gauss`, then `/project create <path> --template-source <template-or-git-url>`.
