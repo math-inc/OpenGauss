@@ -20,3 +20,15 @@ Current scenarios:
   - verifies the installer bootstraps its own Debian/Ubuntu prerequisites
   - stages a dummy `OPENAI_API_KEY` to test non-interactive provider setup
   - verifies the workflow-derived workspace, config, guide, and helper scripts
+
+- `ubuntu_managed_prove_sorry_smoke`
+  Verifies that a stock `ubuntu:24.04` container can install from the current
+  checkout and stage a managed `/prove` run against a tiny Lean project
+  containing one `sorry`. This scenario:
+  - installs via `./scripts/install-internal.sh` from a mounted git checkout
+  - accepts either `ANTHROPIC_API_KEY` (Claude backend) or `OPENAI_API_KEY`
+    (Codex backend)
+  - initializes a local `.gauss` manifest in the fixture project
+  - verifies the staged startup context, managed skill, and backend instructions
+  - verifies the managed MCP config points `LEAN_PROJECT_PATH` at the fixture
+  - leaves an opt-in `LIVE_MANAGED_PROVE_SMOKE=1` path for manual backend runs
