@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Refuse sourced or non-bash invocation: zsh leaves BASH_SOURCE unset, misplacing the venv.
+if [[ -z "${BASH_VERSION:-}" ]]; then
+  printf 'error: scripts/install.sh must be executed with bash, not sourced. Run: ./scripts/install.sh\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  printf 'error: scripts/install.sh must be executed, not sourced. Run: ./scripts/install.sh\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNNER_VENV="$REPO_ROOT/.opengauss-installer-venv"
-DEFAULT_INSTALL_TARGET="opengauss"
+# Prefer the checked-in template: the shared `opengauss` alias at morph.new has been observed to 404.
+LOCAL_TEMPLATE_YAML="$REPO_ROOT/.github/morph/opengauss-template.yaml"
+if [ -f "$LOCAL_TEMPLATE_YAML" ]; then
+  DEFAULT_INSTALL_TARGET="$LOCAL_TEMPLATE_YAML"
+else
+  DEFAULT_INSTALL_TARGET="opengauss"
+fi
 INSTALL_TARGET="${OPEN_GAUSS_INSTALL_TARGET:-${OPEN_GAUSS_TEMPLATE_TARGET:-$DEFAULT_INSTALL_TARGET}}"
 DEFAULT_SESSION_NAME="gauss"
 SESSION_NAME="${OPEN_GAUSS_SESSION_NAME:-$DEFAULT_SESSION_NAME}"
