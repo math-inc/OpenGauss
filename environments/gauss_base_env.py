@@ -470,7 +470,8 @@ class GaussAgentBaseEnv(BaseEnv):
         messages.append({"role": "user", "content": self.format_prompt(item)})
 
         # Run the agent loop
-        result: AgentResult
+        tree_g = int(os.getenv("TREE_SEARCH_G", "1"))
+        results_all: Any
         if self._use_managed_server():
             # Phase 2: ManagedServer with ToolCallTranslator -- exact tokens + logprobs
             # tool_parser is set on ServerManager in __init__ and passed through
@@ -491,7 +492,7 @@ class GaussAgentBaseEnv(BaseEnv):
                         max_tokens=self.config.max_token_length,
                         extra_body=self.config.extra_body,
                     )
-                    result = await agent.run(messages)
+                    results_all = await agent.run(messages, G=tree_g)
             except NotImplementedError:
                 # DummyManagedServer not allowed -- fall back to Phase 1
                 logger.warning(
@@ -508,7 +509,7 @@ class GaussAgentBaseEnv(BaseEnv):
                     max_tokens=self.config.max_token_length,
                     extra_body=self.config.extra_body,
                 )
-                result = await agent.run(messages)
+                results_all = await agent.run(messages, G=tree_g)
         else:
             # Phase 1: OpenAI server -- native tool_calls, placeholder tokens
             agent = GaussAgentLoop(
@@ -521,15 +522,47 @@ class GaussAgentBaseEnv(BaseEnv):
                 max_tokens=self.config.max_token_length,
                 extra_body=self.config.extra_body,
             )
-            result = await agent.run(messages)
+            results_all = await agent.run(messages, G=tree_g)
 
-        # Skip reward computation if the agent loop produced no meaningful work
-        # (e.g., API call failed on turn 1). No point spinning up a Modal sandbox
-        # just to verify files that were never created.
+        # Consolidate multi-branch trajectories for Best-of-N Scoring (Pass@G validation)
+        reward_computed_externally = False
+        reward = 0.0
+        result: AgentResult
+
+        if isinstance(results_all, list):
+            if len(results_all) > 1:
+                logger.info(f"🌳 Tree-Search yielded {len(results_all)} branches. Performing Best-of-N scoring...")
+                best_res = results_all[0]
+                best_rew = -999.0
+                for idx, res in enumerate(results_all):
+                    branch_ctx_id = f"{task_id}-branch-{idx}"
+                    branch_ctx = ToolContext(branch_ctx_id)
+                    try:
+                        r = await self.compute_reward(item, res, branch_ctx)
+                    except Exception as ex:
+                        logger.warning(f"Scoring failed for branch {idx}: {ex}")
+                        r = 0.0
+                    finally:
+                        branch_ctx.cleanup()
+                    if r > best_rew:
+                        best_rew = r
+                        best_res = res
+                result = best_res
+                reward = max(best_rew, 0.0)
+                reward_computed_externally = True
+                logger.info(f"🎯 Best-of-N Selected Branch {results_all.index(result)} with score {reward}")
+            else:
+                result = results_all[0]
+        else:
+            result = results_all
+
+        # Skip reward computation if already done externally or produced no work
         only_system_and_user = all(
             msg.get("role") in ("system", "user") for msg in result.messages
         )
-        if result.turns_used == 0 or only_system_and_user:
+        if reward_computed_externally:
+            pass  # already calculated above
+        elif result.turns_used == 0 or only_system_and_user:
             logger.warning(
                 "Agent loop produced no output (turns=%d, msgs=%d). Skipping reward.",
                 result.turns_used, len(result.messages),
@@ -659,12 +692,10 @@ class GaussAgentBaseEnv(BaseEnv):
         """
         raise NotImplementedError
 
-    @abstractmethod
     async def evaluate(self, *args, **kwargs):
         """
-        Periodic evaluation. Called every steps_per_eval steps.
-
-        Typical implementation runs the agent on a held-out eval set
-        and logs metrics via wandb/evaluate_log.
+        Concrete implementation of evaluate to satisfy the abstract method contract.
+        The evaluation runs are driven by the CLI 'evaluate' wrapper which invokes
+        run() inside atroposlib.
         """
-        raise NotImplementedError
+        pass

@@ -468,9 +468,8 @@ class TerminalBench2EvalEnv(GaussAgentBaseEnv):
             messages.append({"role": "user", "content": self.format_prompt(eval_item)})
 
             # --- 4. Run agent loop ---
-            # Use ManagedServer (Phase 2) for vLLM/SGLang backends to get
-            # token-level tracking via /generate. Falls back to direct
-            # ServerManager (Phase 1) for OpenAI endpoints.
+            tree_g = int(os.getenv("TREE_SEARCH_G", "1"))
+            
             if self._use_managed_server():
                 async with self.server.managed_server(
                     tokenizer=self.tokenizer,
@@ -486,7 +485,7 @@ class TerminalBench2EvalEnv(GaussAgentBaseEnv):
                         max_tokens=self.config.max_token_length,
                         extra_body=self.config.extra_body,
                     )
-                    result = await agent.run(messages)
+                    results_all = await agent.run(messages, G=tree_g)
             else:
                 agent = GaussAgentLoop(
                     server=self.server,
@@ -498,29 +497,106 @@ class TerminalBench2EvalEnv(GaussAgentBaseEnv):
                     max_tokens=self.config.max_token_length,
                     extra_body=self.config.extra_body,
                 )
-                result = await agent.run(messages)
+                results_all = await agent.run(messages, G=tree_g)
 
-            # --- 5. Verify -- run test suite in the agent's sandbox ---
-            # Skip verification if the agent produced no meaningful output
-            only_system_and_user = all(
-                msg.get("role") in ("system", "user") for msg in result.messages
-            )
-            if result.turns_used == 0 or only_system_and_user:
-                logger.warning(
-                    "Task %s: agent produced no output (turns=%d). Reward=0.",
-                    task_name, result.turns_used,
+            # --- 5. Tree-Search Result Consolidation & Best-of-N Scoring ---
+            # Define core verification runner to execute validation in target sandbox
+            def _run_verification_for_context(target_task_id: str, final_result) -> float:
+                only_sys_user = all(
+                    msg.get("role") in ("system", "user") for msg in final_result.messages
                 )
-                reward = 0.0
+                if final_result.turns_used == 0 or only_sys_user:
+                    return 0.0
+                    
+                ctx = ToolContext(target_task_id)
+                try:
+                    # 1. Create logs directory
+                    ctx.terminal("mkdir -p /logs/verifier", timeout=30)
+
+                    # 2. Upload the verification test suite
+                    tests_tar = eval_item.get("tests_tar", "")
+                    if tests_tar:
+                        temp_tests_dir = Path(tempfile.mkdtemp(prefix=f"tb2-tests-{target_task_id[:8]}-"))
+                        try:
+                            _extract_base64_tar(tests_tar, temp_tests_dir)
+                            local_tar_path = temp_tests_dir / "archive.tar"
+                            with tarfile.open(local_tar_path, "w") as tar:
+                                for child in temp_tests_dir.iterdir():
+                                    if child.name != "archive.tar":
+                                        tar.add(child, arcname=child.name)
+                            ctx.upload_file(str(local_tar_path), "/tmp/tests_suite.tar")
+                            ctx.terminal("mkdir -p /tests && tar -xf /tmp/tests_suite.tar -C /", timeout=60)
+                        finally:
+                            shutil.rmtree(temp_tests_dir, ignore_errors=True)
+
+                    # 3. Write and run test_sh script
+                    test_sh = eval_item.get("test_sh", "")
+                    if test_sh:
+                        test_sh = test_sh.replace('\r\n', '\n')
+                        ctx.write_file("/test.sh", test_sh)
+                        ctx.terminal("chmod +x /test.sh", timeout=10)
+                        test_result = ctx.terminal("/bin/bash /test.sh", timeout=self.config.test_timeout)
+                        logger.info(f"Verification exit code for {task_name} ({target_task_id[:8]}): {test_result.get('exit_code')}")
+
+                    # 4. Harvest reward
+                    reward_val = ctx.terminal("cat /logs/verifier/reward.txt", timeout=10)
+                    reward_str = reward_val.get("output", "").strip()
+                    try:
+                        return float(reward_str)
+                    except ValueError:
+                        return 1.0 if test_sh and test_result.get("exit_code") == 0 else 0.0
+                except Exception as verr:
+                    logger.error(f"Verification crashed for {task_name} ({target_task_id}): {verr}")
+                    return 0.0
+                finally:
+                    ctx.cleanup()
+
+            # Main routing logic: Consolidated single or multi-branch trajectory analysis
+            reward = 0.0
+            result = None
+            
+            if isinstance(results_all, list):
+                if len(results_all) > 1:
+                    tqdm.write(f"  [TREE] Multi-branch G={len(results_all)} finished. Executing Best-of-N scoring...")
+                    best_res = results_all[0]
+                    best_rew = -1.0
+                    
+                    # Validate every parallel branch sandbox in sequence
+                    for idx, res in enumerate(results_all):
+                        branch_task_id = getattr(res, "task_id", None) or f"{task_id}-branch-{idx}"
+                        
+                        # Register environment overrides so verification boots the correct image!
+                        register_task_env_overrides(branch_task_id, {
+                            "modal_image": modal_image,
+                            "docker_image": modal_image,
+                            "cwd": "/app",
+                        })
+                        
+                        tqdm.write(f"    Scoring branch {idx} ({branch_task_id[:8] if branch_task_id else 'unknown'})...")
+                        branch_reward = _run_verification_for_context(branch_task_id, res)
+                        tqdm.write(f"      Branch {idx} Reward: {branch_reward}")
+                        
+                        # Best-of-N Selection logic
+                        if branch_reward > best_rew:
+                            best_rew = branch_reward
+                            best_res = res
+                        elif abs(branch_reward - best_rew) < 1e-5 and res.turns_used < best_res.turns_used:
+                            best_res = res
+                            
+                    result = best_res
+                    reward = best_rew
+                    tqdm.write(f"  [TREE] Best-of-N Selected: Reward={reward:.2f} (Turns={result.turns_used})")
+                elif len(results_all) == 1:
+                    result = results_all[0]
+                    tqdm.write(f"  [VERIFYING] {task_name}...")
+                    reward = _run_verification_for_context(task_id, result)
+                else:
+                    # Empty list edge case
+                    raise RuntimeError(f"Agent execution yielded 0 trajectories for {task_name}")
             else:
-                # This checkout does not include the full verification runner
-                # for Terminal-Bench 2.0. Keep the environment importable and
-                # return a conservative zero reward until that logic is added
-                # back explicitly.
-                logger.warning(
-                    "Task %s: verification runner unavailable in this checkout. Reward=0.",
-                    task_name,
-                )
-                reward = 0.0
+                result = results_all
+                tqdm.write(f"  [VERIFYING] {task_name}...")
+                reward = _run_verification_for_context(task_id, result)
 
             passed = reward >= 1.0
             duration_seconds = time.time() - task_start
@@ -547,3 +623,206 @@ class TerminalBench2EvalEnv(GaussAgentBaseEnv):
             clear_task_env_overrides(task_id)
             if task_dir and Path(task_dir).exists():
                 shutil.rmtree(task_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Evaluate -- orchestration and concurrent execution
+    # =========================================================================
+
+    async def _run_with_timeout(self, item: Dict[str, Any], sem: Optional[asyncio.Semaphore] = None) -> Dict:
+        """Wrap a single task rollout with a wall-clock timeout and concurrency semaphore."""
+        task_name = item.get("task_name", "unknown")
+        category = item.get("category", "unknown")
+        
+        if sem is not None:
+            await sem.acquire()
+            
+        try:
+            return await asyncio.wait_for(
+                self.rollout_and_score_eval(item),
+                timeout=self.config.task_timeout,
+            )
+        except asyncio.TimeoutError:
+            from tqdm import tqdm
+            tqdm.write(f"  [TIMEOUT] {task_name} (exceeded {self.config.task_timeout}s)")
+            out = {
+                "passed": False,
+                "reward": 0.0,
+                "task_name": task_name,
+                "category": category,
+                "turns_used": 0,
+                "duration_seconds": float(self.config.task_timeout),
+                "error": "timeout",
+            }
+            self._save_result(out)
+            return out
+        finally:
+            if sem is not None:
+                sem.release()
+
+    async def evaluate(self, *args, **kwargs) -> None:
+        """
+        Run Terminal-Bench 2.0 evaluation over all tasks.
+        
+        Executes tasks with controlled concurrency via an asyncio.Semaphore,
+        bounded by self.config.eval_concurrency (if set) or self.config.max_concurrent_tasks.
+        """
+        start_time = time.time()
+        from tqdm import tqdm
+        
+        # --- tqdm-compatible logging handler ---
+        class _TqdmHandler(logging.Handler):
+            def emit(self, record):
+                try:
+                    tqdm.write(self.format(record))
+                except Exception:
+                    self.handleError(record)
+
+        root = logging.getLogger()
+        handler = _TqdmHandler()
+        handler.setFormatter(
+            logging.Formatter("%(levelname)s %(name)s: %(message)s")
+        )
+        # Clean up existing stream handlers to prevent duplicate prints
+        for h in list(root.handlers):
+            if isinstance(h, logging.StreamHandler):
+                root.removeHandler(h)
+        root.addHandler(handler)
+        for noisy in ("httpx", "openai", "httpcore"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
+        # Resolve concurrency limit
+        concurrency = self.config.eval_concurrency
+        if concurrency == 0:
+            concurrency = getattr(self.config, "max_concurrent_tasks", 8)
+        
+        print(f"\n{'='*60}")
+        print(f"Starting {self.name.upper()} Evaluation")
+        print(f"{'='*60}")
+        print(f"  Total tasks: {len(self.all_eval_items)}")
+        print(f"  Concurrency: {concurrency}")
+        print(f"  Task timeout: {self.config.task_timeout}s")
+        print(f"{'='*60}\n")
+
+        sem = asyncio.Semaphore(concurrency) if concurrency > 0 else None
+        
+        # Launch all tasks
+        tasks = []
+        for item in self.all_eval_items:
+            task = asyncio.create_task(self._run_with_timeout(item, sem))
+            tasks.append(task)
+
+        results = []
+        pbar = tqdm(total=len(tasks), desc=self.name.upper(), dynamic_ncols=True)
+
+        try:
+            for completed in asyncio.as_completed(tasks):
+                res = await completed
+                if res:
+                    results.append(res)
+                    self._save_result(res)
+                passed_count = sum(1 for r in results if r.get("passed"))
+                pbar.set_postfix_str(f"passed={passed_count}/{len(results)}")
+                pbar.update(1)
+
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            tqdm.write("\n[INTERRUPTED] Cancelling remaining tasks...")
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            pbar.close()
+            # Cleanup
+            if hasattr(self, "_streaming_file") and not self._streaming_file.closed:
+                self._streaming_file.close()
+            return
+
+        pbar.close()
+        end_time = time.time()
+
+        # --- Compute metrics ---
+        valid = [r for r in results if r is not None]
+        if not valid:
+            print("Warning: No valid results produced.")
+            return
+
+        total = len(valid)
+        passed_total = sum(1 for r in valid if r.get("passed"))
+        pass_rate = passed_total / total if total else 0.0
+        avg_turns = sum(r.get("turns_used", 0) for r in valid) / total if total else 0.0
+
+        # Category breakdowns
+        cat_results = defaultdict(list)
+        for r in valid:
+            cat = r.get("category", "unknown")
+            cat_results[cat].append(r)
+
+        eval_metrics = {
+            "eval/pass_rate": pass_rate,
+            "eval/total_tasks": total,
+            "eval/passed_tasks": passed_total,
+            "eval/avg_turns": avg_turns,
+            "eval/evaluation_time_seconds": end_time - start_time,
+        }
+
+        for cat, items in sorted(cat_results.items()):
+            cp = sum(1 for r in items if r.get("passed"))
+            ct = len(items)
+            eval_metrics[f"eval/pass_rate_{cat.replace('-', '_')}"] = cp / ct if ct else 0.0
+
+        self.eval_metrics = [(k, v) for k, v in eval_metrics.items()]
+
+        # --- Print Summary ---
+        print(f"\n{'='*60}")
+        print(f"{self.name.upper()} Evaluation Results")
+        print(f"{'='*60}")
+        print(f"Overall Pass Rate: {pass_rate:.1%} ({passed_total}/{total})")
+        print(f"Average Turns: {avg_turns:.2f}")
+        print(f"Evaluation Time: {end_time - start_time:.1f}s")
+        print("\nPer-category Breakdown:")
+        for cat, items in sorted(cat_results.items()):
+            cp = sum(1 for r in items if r.get("passed"))
+            ct = len(items)
+            print(f"  {cat:<25}: {cp:>2}/{ct:<2} passed ({cp/ct:.1%})")
+        print(f"{'='*60}\n")
+
+        # --- Log to files ---
+        try:
+            samples = [{k: v for k, v in r.items() if k != "messages"} for r in valid]
+            await self.evaluate_log(
+                metrics=eval_metrics,
+                samples=samples,
+                start_time=start_time,
+                end_time=end_time,
+                generation_parameters={
+                    "temperature": self.config.agent_temperature,
+                    "max_tokens": self.config.max_token_length,
+                    "max_agent_turns": self.config.max_agent_turns,
+                }
+            )
+        except Exception as e:
+            print(f"Error logging results: {e}")
+
+        # Cleanup
+        if hasattr(self, "_streaming_file") and not self._streaming_file.closed:
+            self._streaming_file.close()
+            print(f"Streaming results finalized in: {self._streaming_path}")
+
+        try:
+            from tools.terminal_tool import cleanup_all_environments
+            cleanup_all_environments()
+        except Exception:
+            pass
+
+        try:
+            from environments.agent_loop import _tool_executor
+            _tool_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    async def wandb_log(self, wandb_metrics: Optional[Dict] = None):
+        """Log TB2-specific metrics to wandb."""
+        if wandb_metrics is None:
+            wandb_metrics = {}
+        for k, v in getattr(self, "eval_metrics", []):
+            wandb_metrics[k] = v
+        self.eval_metrics = []
+        await super().wandb_log(wandb_metrics)

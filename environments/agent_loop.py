@@ -64,6 +64,8 @@ class AgentResult:
 
     # Full conversation history in OpenAI message format
     messages: List[Dict[str, Any]]
+    # The execution environment / sandbox identifier
+    task_id: Optional[str] = None
     # ManagedServer.get_state() if available (Phase 2), None otherwise
     managed_state: Optional[Dict[str, Any]] = None
     # How many LLM calls were made
@@ -388,6 +390,7 @@ class GaussAgentLoop:
         for b in branches:
             final_results.append(AgentResult(
                 messages=b.messages,
+                task_id=b.task_id,
                 managed_state=self._get_managed_state(),
                 turns_used=b.turns_used,
                 finished_naturally=b.finished_naturally,
