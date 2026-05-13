@@ -125,7 +125,7 @@ class ObservationTruncator:
         if len(observation) > max_chars:
             half = max_chars // 2
             truncated_len = len(observation) - max_chars
-            logger.info("Truncating massive observation from %d to %d chars.", len(observation), max_chars)
+            logger.info("Observation truncated to %d chars.", max_chars)
             return (
                 observation[:half] + 
                 f"\n\n--- [TRUNCATED {truncated_len} CHARACTERS TO PREVENT BLOWOUT] ---\n\n" + 
@@ -153,10 +153,10 @@ class SGLangClientWrapper:
         prompt_hash = hashlib.sha256(prompt_str.encode()).hexdigest()[:16]
         
         if prompt_hash in self._prefix_cache:
-            logger.info("🚀 SGLang [RadixAttention] CACHE HIT for prefix %s. Reusing shared KV state!", prompt_hash)
+            logger.debug("🚀 SGLang [RadixAttention] CACHE HIT for prefix %s. Reusing shared KV state!", prompt_hash)
         else:
             self._prefix_cache.add(prompt_hash)
-            logger.info("⏳ SGLang [RadixAttention] CACHE MISS. Initializing KV-prefill for prefix %s...", prompt_hash)
+            logger.debug("⏳ SGLang [RadixAttention] CACHE MISS. Initializing KV-prefill for prefix %s...", prompt_hash)
             
         # Proxy to underlying server, injecting parallel completion requests
         chat_kwargs = {

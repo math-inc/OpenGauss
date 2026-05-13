@@ -535,7 +535,7 @@ class GaussAgentBaseEnv(BaseEnv):
                 best_res = results_all[0]
                 best_rew = -999.0
                 for idx, res in enumerate(results_all):
-                    branch_ctx_id = f"{task_id}-branch-{idx}"
+                    branch_ctx_id = getattr(res, "task_id", None) or f"{task_id}-branch-{idx}"
                     branch_ctx = ToolContext(branch_ctx_id)
                     try:
                         r = await self.compute_reward(item, res, branch_ctx)
