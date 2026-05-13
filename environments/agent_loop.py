@@ -153,10 +153,10 @@ class SGLangClientWrapper:
         prompt_hash = hashlib.sha256(prompt_str.encode()).hexdigest()[:16]
         
         if prompt_hash in self._prefix_cache:
-            logger.debug("🚀 SGLang [RadixAttention] CACHE HIT for prefix %s. Reusing shared KV state!", prompt_hash)
+            logger.debug("SGLang [RadixAttention] CACHE HIT for prefix %s. Reusing shared KV state!", prompt_hash)
         else:
             self._prefix_cache.add(prompt_hash)
-            logger.debug("⏳ SGLang [RadixAttention] CACHE MISS. Initializing KV-prefill for prefix %s...", prompt_hash)
+            logger.debug("SGLang [RadixAttention] CACHE MISS. Initializing KV-prefill for prefix %s...", prompt_hash)
             
         # Proxy to underlying server, injecting parallel completion requests
         chat_kwargs = {

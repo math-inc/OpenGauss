@@ -531,7 +531,7 @@ class GaussAgentBaseEnv(BaseEnv):
 
         if isinstance(results_all, list):
             if len(results_all) > 1:
-                logger.info(f"🌳 Tree-Search yielded {len(results_all)} branches. Performing Best-of-N scoring...")
+                logger.info(f"Tree-Search yielded {len(results_all)} branches. Performing Best-of-N scoring...")
                 best_res = results_all[0]
                 best_rew = -999.0
                 for idx, res in enumerate(results_all):
@@ -550,7 +550,7 @@ class GaussAgentBaseEnv(BaseEnv):
                 result = best_res
                 reward = max(best_rew, 0.0)
                 reward_computed_externally = True
-                logger.info(f"🎯 Best-of-N Selected Branch {results_all.index(result)} with score {reward}")
+                logger.info(f"Best-of-N Selected Branch {results_all.index(result)} with score {reward}")
             else:
                 result = results_all[0]
         else:
