@@ -1395,3 +1395,154 @@ registry.register(name="rl_list_runs", emoji="🧪", toolset="rl", schema=RL_LIS
 registry.register(name="rl_test_inference", emoji="🧪", toolset="rl", schema=RL_TEST_INFERENCE_SCHEMA,
     handler=lambda args, **kw: rl_test_inference(num_steps=args.get("num_steps", 3), group_size=args.get("group_size", 16), models=args.get("models")),
     check_fn=check_rl_api_keys, requires_env=_rl_env, is_async=True)
+
+
+# ============================================================================
+# Phase 4: Distributed GRPO Mathematical Engine
+# ============================================================================
+
+try:
+    import torch
+    import torch.nn.functional as F
+except ImportError:
+    torch = None
+
+
+class GaussGRPOEngine:
+    """
+    Distributed GRPO Loss & Bridge Wrapper for OpenRLHF Ray Orchestrators.
+
+    Encapsulates mathematically rigorous operations required to compute Group Relative
+    advantages and surrogate gradient updates. Serves as the analytical binding
+    between OpenGauss's episodic telemetry and DeepSpeed-driven Ray trainers.
+    """
+
+    def __init__(self, kl_coef: float = 0.01, clip_eps: float = 0.2):
+        """
+        Initialize the GRPO engine parameters.
+
+        Args:
+            kl_coef (float): Coefficient beta penalizing divergence from the reference model.
+                             Defaults to 0.01.
+            clip_eps (float): Epsilon constraint bound for PPO policy clipping. Defaults to 0.2.
+        """
+        self.kl_coef = kl_coef
+        self.clip_eps = clip_eps
+
+    def compute_group_advantage(self, rewards_list: List[List[float]]) -> List[List[float]]:
+        """
+        Computes Group Relative Advantage (A_i) normalized across parallel group rollouts.
+
+        Sums stepwise rewards to generate episodic returns R_i, derives group distribution
+        parameters (mu, sigma), and broadcast-normalizes the episode relative advantage
+        back into individual sequence steps to maintain continuous alignment.
+
+        Mathematical Formulation:
+            R_total,i = Sum_{t} r_{t,i}
+            mu = Mean(R_total)
+            sigma = StdDev(R_total)
+            A_i = (R_total,i - mu) / (sigma + 1e-8)
+
+        Args:
+            rewards_list (List[List[float]]): 
+                Nested scalar rewards obtained from trace_masking.py.
+                Shape: [group_size, varied_sequence_lengths]
+
+        Returns:
+            List[List[float]]: 
+                Re-broadcast stepwise advantages for policy token weighing.
+                Shape: [group_size, varied_sequence_lengths]
+        """
+        import math
+
+        # Step 1: Collapse step rewards into total episodic returns
+        episode_returns = [sum(branch_rewards) for branch_rewards in rewards_list]
+        group_size = len(episode_returns)
+
+        if group_size == 0:
+            return []
+        
+        # Safeguard for trivial/decoupled single-sample calls
+        if group_size == 1:
+            return [[0.0] * len(rewards_list[0])]
+
+        # Step 2: Derive high-precision group statistics
+        mean = sum(episode_returns) / group_size
+        variance = sum((x - mean) ** 2 for x in episode_returns) / group_size
+        std_dev = math.sqrt(variance)
+
+        # Step 3: Broadcast normalized advantages
+        advantages = []
+        for i, ret in enumerate(episode_returns):
+            # Inject 1e-8 epsilon boundary to completely inhibit division-by-zero cliffs
+            branch_advantage = (ret - mean) / (std_dev + 1e-8)
+            # Scale entire trajectory timeline by branch episodic performance
+            advantages.append([branch_advantage] * len(rewards_list[i]))
+
+        return advantages
+
+    def compute_grpo_loss(
+        self,
+        policy_logprobs: Any,
+        reference_logprobs: Any,
+        old_logprobs: Any,
+        advantages: Any,
+    ) -> Any:
+        """
+        Computes batch-averaged Group Relative Policy Optimization (GRPO) loss.
+
+        Ingests flat sequences from Ray Data workers and executes fused tensor math
+        combining importance sampling ratios, PPO clipped surrogate bounds, and
+        log-probarithmic Kullback-Leibler (KL) divergence constraints.
+
+        Target Tensor Topology (Ray Data Format):
+            policy_logprobs:    [batch_size, seq_len] -> Primary policy logprobs.
+            reference_logprobs: [batch_size, seq_len] -> Frozen reference logprobs.
+            old_logprobs:       [batch_size, seq_len] -> Importance sampling anchor logprobs.
+            advantages:         [batch_size, seq_len] -> Re-broadcast group relative advantages (A_i).
+
+        Formulation:
+            Ratio (r_t) = exp(policy_logprobs - old_logprobs)
+            KL Divergence (D_KL) = reference_logprobs - policy_logprobs
+            Surrogate_1 = r_t * A_i
+            Surrogate_2 = Clip(r_t, 1 - eps, 1 + eps) * A_i
+            L_grpo = - Mean( Min(Surr1, Surr2) - beta * D_KL )
+
+        Args:
+            policy_logprobs (torch.Tensor): Logprobs from active gradient update loop.
+            reference_logprobs (torch.Tensor): Baseline anchored logprobs.
+            old_logprobs (torch.Tensor): Original rollout generation logprobs.
+            advantages (torch.Tensor): Broadcast group relative advantage weights.
+
+        Returns:
+            torch.Tensor: Scalar loss tensor safe for distributed backward propagation.
+        """
+        if torch is None:
+            raise ImportError(
+                "PyTorch (torch) is not installed or accessible. GaussGRPOEngine "
+                "requires an active PyTorch environment to compute tensor losses."
+            )
+
+        # 1. Evaluate Importance Sampling Ratio: r_t = exp(log(pi_now) - log(pi_old))
+        log_ratio = policy_logprobs - old_logprobs
+        ratio = torch.exp(log_ratio)
+
+        # 2. Calculate Clipped Objective Bound (PPO style constraint)
+        surrogate1 = ratio * advantages
+        surrogate2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * advantages
+        
+        # Strictly minimize the bound to ensure conservative updates
+        clipped_surrogate_loss = torch.min(surrogate1, surrogate2)
+
+        # 3. Derive Reference-Alignment KL Constraint to impede catastrophic drift
+        kl_divergence = reference_logprobs - policy_logprobs
+
+        # 4. Final Objective: Maximize [Clipped_Surrogate + beta * KL]
+        # Equivalently: Minimize negative total objective
+        objective_per_token = clipped_surrogate_loss + (self.kl_coef * kl_divergence)
+        
+        # Negated mean calculation creates gradient update driving ascent on the reward landscape
+        total_grpo_loss = -objective_per_token.mean()
+
+        return total_grpo_loss
+

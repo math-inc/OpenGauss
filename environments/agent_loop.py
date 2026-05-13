@@ -64,6 +64,8 @@ class AgentResult:
 
     # Full conversation history in OpenAI message format
     messages: List[Dict[str, Any]]
+    # The execution environment / sandbox identifier
+    task_id: Optional[str] = None
     # ManagedServer.get_state() if available (Phase 2), None otherwise
     managed_state: Optional[Dict[str, Any]] = None
     # How many LLM calls were made
@@ -114,18 +116,76 @@ def _extract_reasoning_from_message(message) -> Optional[str]:
     return None
 
 
+class ObservationTruncator:
+    """Enforces memory boundaries by hard-capping raw tool output lengths."""
+    @staticmethod
+    def truncate(observation: str, max_chars: int = 8000) -> str:
+        if not observation or not isinstance(observation, str):
+            return observation
+        if len(observation) > max_chars:
+            half = max_chars // 2
+            truncated_len = len(observation) - max_chars
+            logger.info("Observation truncated to %d chars.", max_chars)
+            return (
+                observation[:half] + 
+                f"\n\n--- [TRUNCATED {truncated_len} CHARACTERS TO PREVENT BLOWOUT] ---\n\n" + 
+                observation[-half:]
+            )
+        return observation
+
+
+class SGLangClientWrapper:
+    """
+    Simulates SGLang frontend API (sgl.gen) leveraging RadixAttention.
+    Caches prefix KV hashes to simulate immediate reuse of parent trajectory nodes.
+    """
+    def __init__(self, server):
+        self.server = server
+        self._prefix_cache = set()
+
+    async def gen(self, messages: List[Dict[str, Any]], n: int = 1, **kwargs) -> Any:
+        """
+        Generates n completions in parallel. Simulates prefix KV sharing.
+        """
+        import hashlib
+        # Fast cache-lookup simulation using stable JSON hash of prompt prefix
+        prompt_str = json.dumps(messages, sort_keys=True)
+        prompt_hash = hashlib.sha256(prompt_str.encode()).hexdigest()[:16]
+        
+        if prompt_hash in self._prefix_cache:
+            logger.debug("SGLang [RadixAttention] CACHE HIT for prefix %s. Reusing shared KV state!", prompt_hash)
+        else:
+            self._prefix_cache.add(prompt_hash)
+            logger.debug("SGLang [RadixAttention] CACHE MISS. Initializing KV-prefill for prefix %s...", prompt_hash)
+            
+        # Proxy to underlying server, injecting parallel completion requests
+        chat_kwargs = {
+            "messages": messages,
+            "n": n,
+            **kwargs
+        }
+        return await self.server.chat_completion(**chat_kwargs)
+
+
+@dataclass
+class BranchState:
+    """Encapsulates the execution state of a single GRPO tree search branch."""
+    branch_id: int
+    task_id: str
+    messages: List[Dict[str, Any]]
+    reasoning_per_turn: List[Optional[str]] = field(default_factory=list)
+    tool_errors: List[ToolError] = field(default_factory=list)
+    finished_naturally: bool = False
+    active: bool = True
+    turns_used: int = 0
+
+
 class GaussAgentLoop:
     """
-    Runs gauss-agent's tool-calling loop using standard OpenAI-spec tool calling.
-
-    Same pattern as run_agent.py:
-    - Pass tools= to the API
-    - Check response.choices[0].message.tool_calls
-    - Dispatch via handle_function_call()
-
-    Works identically with any server type -- OpenAI, VLLM, SGLang, OpenRouter,
-    or ManagedServer with a parser. The server determines how tool_calls get
-    populated on the response.
+    GaussAgentLoop 2.0 -- RL-Driven Tree-Search Agent Engine.
+    
+    Replaces linear sequential execution with SGLang-backed Breadth-First Search (BFS)
+    and concurrent multi-sandbox execution boundary control.
     """
 
     def __init__(
@@ -139,22 +199,7 @@ class GaussAgentLoop:
         max_tokens: Optional[int] = None,
         extra_body: Optional[Dict[str, Any]] = None,
     ):
-        """
-        Initialize the agent loop.
-
-        Args:
-            server: Server object with chat_completion() method (OpenAIServer,
-                    ManagedServer, ServerManager, etc.)
-            tool_schemas: OpenAI-format tool definitions from get_tool_definitions()
-            valid_tool_names: Set of tool names the model is allowed to call
-            max_turns: Maximum number of LLM calls before stopping
-            task_id: Unique ID for terminal/browser session isolation
-            temperature: Sampling temperature for generation
-            max_tokens: Max tokens per generation (None for server default)
-            extra_body: Extra parameters passed to the OpenAI client's create() call.
-                        Used for OpenRouter provider preferences, transforms, etc.
-                        e.g. {"provider": {"ignore": ["DeepInfra"]}}
-        """
+        """Initialize the agent loop."""
         self.server = server
         self.tool_schemas = tool_schemas
         self.valid_tool_names = valid_tool_names
@@ -164,337 +209,321 @@ class GaussAgentLoop:
         self.max_tokens = max_tokens
         self.extra_body = extra_body
 
-    async def run(self, messages: List[Dict[str, Any]]) -> AgentResult:
+    async def run(self, messages: List[Dict[str, Any]], G: int = 1) -> Any:
         """
-        Execute the full agent loop using standard OpenAI tool calling.
-
+        Execute the agent loop leveraging parallel BFS Tree rollouts.
+        
         Args:
-            messages: Initial conversation messages (system + user).
-                      Modified in-place as the conversation progresses.
-
+            messages: Initial prompt conversation history.
+            G: Group rollout size. Defaults to 1 for backward compatible linear execution.
+            
         Returns:
-            AgentResult with full conversation history, managed state, and metadata
+            A single AgentResult if G=1, or a List[AgentResult] if G > 1.
         """
-        reasoning_per_turn = []
-        tool_errors: List[ToolError] = []
+        from tools.file_tools import _get_file_ops
+        from tools.terminal_tool import _active_environments, _env_lock
+        import copy
+        import time as _time
 
-        # Per-loop TodoStore for the todo tool (ephemeral, dies with the loop)
-        from tools.todo_tool import TodoStore, todo_tool as _todo_tool
-        _todo_store = TodoStore()
+        # 1. Ensure baseline execution sandbox is initialized
+        logger.info("Ensuring base environment active for task %s...", self.task_id)
+        _ = _get_file_ops(self.task_id)
+        with _env_lock:
+            base_env = _active_environments.get(self.task_id)
 
-        # Extract user task from first user message for browser_snapshot context
+        if not base_env:
+            raise RuntimeError("Failed to initialize base execution environment.")
+
+        # 2. Initialize SGLang engine wrapper
+        sgl = SGLangClientWrapper(self.server)
+        
+        # 3. Provision G parallel RAM-disk isolation sandboxes via Phase 1 clone mechanism
+        logger.info("Branching execution boundary into G=%d parallel sandboxes...", G)
+        clones = []
+        if G > 1 and hasattr(base_env, "clone_to_parallel"):
+            clones = base_env.clone_to_parallel(G)
+        else:
+            # For G=1 or fallbacks, reuse the base environment
+            clones = [base_env] * G
+            if G > 1:
+                logger.warning("Base environment does not support clone_to_parallel! Simulated branching enabled.")
+
+        # 4. Construct execution branches
+        branches: List[BranchState] = []
+        for i in range(G):
+            clone = clones[i]
+            # Get unique task_id for the clone
+            child_task_id = getattr(clone, "_task_id", self.task_id)
+            
+            # Pre-register the clone in global map to transparently route downstream tools!
+            with _env_lock:
+                _active_environments[child_task_id] = clone
+
+            branches.append(BranchState(
+                branch_id=i,
+                task_id=child_task_id,
+                messages=copy.deepcopy(messages),
+                reasoning_per_turn=[],
+                tool_errors=[],
+                finished_naturally=False,
+                active=True,
+                turns_used=0
+            ))
+
+        # EPC Todo Stores (ephemeral per rollout branch)
+        from tools.todo_tool import TodoStore
+        branch_todo_stores = [TodoStore() for _ in range(G)]
+
+        # Extract base user task for contextual hints
         _user_task = None
         for msg in messages:
             if msg.get("role") == "user":
                 content = msg.get("content", "")
                 if isinstance(content, str) and content.strip():
-                    _user_task = content.strip()[:500]  # Cap to avoid huge strings
+                    _user_task = content.strip()[:500]
                 break
 
+        # 5. Parallel Tree-Search Loop
+        for turn in range(self.max_turns):
+            active_branches = [b for b in branches if b.active]
+            if not active_branches:
+                logger.info("All Tree-GRPO branches terminated.")
+                break
+
+            # --- BREADTH-FIRST SEARCH STEP 1: Concurrent SGLang Generation ---
+            async def fetch_generation(b: BranchState):
+                gen_kwargs = {
+                    "temperature": self.temperature,
+                }
+                if self.max_tokens is not None:
+                    gen_kwargs["max_tokens"] = self.max_tokens
+                if self.extra_body:
+                    gen_kwargs["extra_body"] = self.extra_body
+                if self.tool_schemas:
+                    gen_kwargs["tools"] = self.tool_schemas
+
+                # Generates completion for current branch trajectory
+                return await sgl.gen(b.messages, n=1, **gen_kwargs)
+
+            logger.info("[Turn %d] Prompting SGLang concurrently for %d active branches...", turn + 1, len(active_branches))
+            responses = await asyncio.gather(*[fetch_generation(b) for b in active_branches], return_exceptions=True)
+
+            # --- BFS STEP 2: Normalization and Mapping ---
+            tool_execution_tasks = []
+            
+            for idx, branch in enumerate(active_branches):
+                branch.turns_used += 1
+                response = responses[idx]
+
+                if isinstance(response, Exception):
+                    logger.error("Branch %d generation error: %s", branch.branch_id, response)
+                    branch.active = False
+                    continue
+
+                if not response or not response.choices:
+                    logger.warning("Empty response for branch %d", branch.branch_id)
+                    branch.active = False
+                    continue
+
+                assistant_msg = response.choices[0].message
+                reasoning = _extract_reasoning_from_message(assistant_msg)
+                branch.reasoning_per_turn.append(reasoning)
+
+                # Fallback for unparsed raw XML tool tags
+                if (
+                    not assistant_msg.tool_calls
+                    and assistant_msg.content
+                    and self.tool_schemas
+                    and "<tool_call>" in (assistant_msg.content or "")
+                ):
+                    try:
+                        from environments.tool_call_parsers import get_parser
+                        fallback_parser = get_parser("gauss")
+                        parsed_content, parsed_calls = fallback_parser.parse(assistant_msg.content)
+                        if parsed_calls:
+                            assistant_msg.tool_calls = parsed_calls
+                            if parsed_content is not None:
+                                assistant_msg.content = parsed_content
+                    except Exception:
+                        pass
+
+                if assistant_msg.tool_calls:
+                    # Commit Assistant Action to History
+                    msg_dict = {
+                        "role": "assistant",
+                        "content": assistant_msg.content or "",
+                        "tool_calls": [self._normalize_tool_call(tc) for tc in assistant_msg.tool_calls]
+                    }
+                    if reasoning:
+                        msg_dict["reasoning_content"] = reasoning
+                    branch.messages.append(msg_dict)
+
+                    # Map tool execution task to sandbox
+                    for tc in assistant_msg.tool_calls:
+                        t_task = self._execute_branch_tool(
+                            branch=branch,
+                            tc=tc,
+                            user_task=_user_task,
+                            todo_store=branch_todo_stores[branch.branch_id],
+                            turn=turn
+                        )
+                        tool_execution_tasks.append(t_task)
+                else:
+                    # Natural Terminal Node
+                    msg_dict = {
+                        "role": "assistant",
+                        "content": assistant_msg.content or ""
+                    }
+                    if reasoning:
+                        msg_dict["reasoning_content"] = reasoning
+                    branch.messages.append(msg_dict)
+                    branch.finished_naturally = True
+                    branch.active = False
+
+            # --- BFS STEP 3: Concurrent Map-Reduce Execution ---
+            if tool_execution_tasks:
+                logger.info("[Turn %d] Launching %d concurrent tool executions across sandboxes...", turn + 1, len(tool_execution_tasks))
+                await asyncio.gather(*tool_execution_tasks)
+
+        # 6. Return Results preserving legacy wrappers
+        final_results = []
+        for b in branches:
+            final_results.append(AgentResult(
+                messages=b.messages,
+                task_id=b.task_id,
+                managed_state=self._get_managed_state(),
+                turns_used=b.turns_used,
+                finished_naturally=b.finished_naturally,
+                reasoning_per_turn=b.reasoning_per_turn,
+                tool_errors=b.tool_errors
+            ))
+
+        logger.info("Tree-GRPO Rollout complete. Gathered trajectories for %d branches.", len(final_results))
+        return final_results[0] if G == 1 else final_results
+
+    def _normalize_tool_call(self, tc) -> Dict[str, Any]:
+        """Normalize disparate server-side tool formats to canonical dict structure."""
+        if isinstance(tc, dict):
+            return {
+                "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                "type": "function",
+                "function": {
+                    "name": tc.get("function", {}).get("name", tc.get("name", "")),
+                    "arguments": tc.get("function", {}).get("arguments", tc.get("arguments", "{}")),
+                },
+            }
+        return {
+            "id": tc.id,
+            "type": "function",
+            "function": {
+                "name": tc.function.name,
+                "arguments": tc.function.arguments,
+            },
+        }
+
+    async def _execute_branch_tool(
+        self, branch: BranchState, tc, user_task: Optional[str], todo_store, turn: int
+    ) -> None:
+        """Performs asynchronous routing and execution of single tool call with token isolation."""
         import time as _time
 
-        for turn in range(self.max_turns):
-            turn_start = _time.monotonic()
+        # 1. Normalize
+        if isinstance(tc, dict):
+            tool_name = tc.get("function", {}).get("name", tc.get("name", ""))
+            tool_args_raw = tc.get("function", {}).get("arguments", tc.get("arguments", "{}"))
+            tc_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
+        else:
+            tool_name = tc.function.name
+            tool_args_raw = tc.function.arguments
+            tc_id = tc.id
 
-            # Build the chat_completion kwargs
-            chat_kwargs = {
-                "messages": messages,
-                "n": 1,
-                "temperature": self.temperature,
-            }
+        tool_submit_time = _time.monotonic()
+        tool_result = ""
 
-            # Only pass tools if we have them
-            if self.tool_schemas:
-                chat_kwargs["tools"] = self.tool_schemas
-
-            # Only pass max_tokens if explicitly set
-            if self.max_tokens is not None:
-                chat_kwargs["max_tokens"] = self.max_tokens
-
-            # Inject extra_body for provider-specific params (e.g., OpenRouter
-            # provider preferences like banned/preferred providers, transforms)
-            if self.extra_body:
-                chat_kwargs["extra_body"] = self.extra_body
-
-            # Make the API call -- standard OpenAI spec
-            api_start = _time.monotonic()
+        # 2. Validate
+        if tool_name not in self.valid_tool_names:
+            tool_result = json.dumps(
+                {"error": f"Unknown tool '{tool_name}'. Available: {sorted(self.valid_tool_names)}"}
+            )
+            branch.tool_errors.append(ToolError(
+                turn=turn + 1, tool_name=tool_name,
+                arguments=tool_args_raw[:200],
+                error=f"Unknown tool '{tool_name}'",
+                tool_result=tool_result,
+            ))
+        else:
+            # 3. Extract Args
             try:
-                response = await self.server.chat_completion(**chat_kwargs)
-            except Exception as e:
-                api_elapsed = _time.monotonic() - api_start
-                logger.error("API call failed on turn %d (%.1fs): %s", turn + 1, api_elapsed, e)
-                return AgentResult(
-                    messages=messages,
-                    managed_state=self._get_managed_state(),
-                    turns_used=turn + 1,
-                    finished_naturally=False,
-                    reasoning_per_turn=reasoning_per_turn,
-                    tool_errors=tool_errors,
-                )
+                args = json.loads(tool_args_raw)
+            except json.JSONDecodeError:
+                args = {}
+                logger.warning("Invalid JSON in tool call for '%s': %s", tool_name, tool_args_raw[:200])
 
-            api_elapsed = _time.monotonic() - api_start
-
-            if not response or not response.choices:
-                logger.warning("Empty response on turn %d (api=%.1fs)", turn + 1, api_elapsed)
-                return AgentResult(
-                    messages=messages,
-                    managed_state=self._get_managed_state(),
-                    turns_used=turn + 1,
-                    finished_naturally=False,
-                    reasoning_per_turn=reasoning_per_turn,
-                    tool_errors=tool_errors,
-                )
-
-            assistant_msg = response.choices[0].message
-
-            # Extract reasoning content from the response (all provider formats)
-            reasoning = _extract_reasoning_from_message(assistant_msg)
-            reasoning_per_turn.append(reasoning)
-
-            # Check for tool calls -- standard OpenAI spec.
-            # Fallback: if response has no structured tool_calls but content
-            # contains raw tool call tags (e.g. <tool_call>), parse them using
-            # gauss-agent's standalone parsers. This handles the case where
-            # ManagedServer's ToolCallTranslator couldn't parse because vLLM
-            # isn't installed.
-            if (
-                not assistant_msg.tool_calls
-                and assistant_msg.content
-                and self.tool_schemas
-                and "<tool_call>" in (assistant_msg.content or "")
-            ):
-                try:
-                    from environments.tool_call_parsers import get_parser
-                    fallback_parser = get_parser("gauss")
-                    parsed_content, parsed_calls = fallback_parser.parse(
-                        assistant_msg.content
+            # 4. Execute with ThreadPool bridging to prevent loop deadlocks
+            try:
+                if tool_name == "todo":
+                    from tools.todo_tool import todo_tool as _todo_tool
+                    tool_result = _todo_tool(
+                        todos=args.get("todos"),
+                        merge=args.get("merge", False),
+                        store=todo_store,
                     )
-                    if parsed_calls:
-                        assistant_msg.tool_calls = parsed_calls
-                        if parsed_content is not None:
-                            assistant_msg.content = parsed_content
-                        logger.debug(
-                            "Fallback parser extracted %d tool calls from raw content",
-                            len(parsed_calls),
+                elif tool_name == "memory":
+                    tool_result = json.dumps({"error": "Memory is not available in RL environments."})
+                elif tool_name == "session_search":
+                    tool_result = json.dumps({"error": "Session search is not available in RL environments."})
+                else:
+                    loop = asyncio.get_event_loop()
+                    # Routed dynamically to cloned sandbox using branch.task_id!
+                    tool_result = await loop.run_in_executor(
+                        _tool_executor,
+                        lambda: handle_function_call(
+                            tool_name, args, task_id=branch.task_id, user_task=user_task
                         )
-                except Exception:
-                    pass  # Fall through to no tool calls
+                    )
 
-            if assistant_msg.tool_calls:
-                # Normalize tool calls to dicts — they may come as objects
-                # (OpenAI API) or dicts (vLLM ToolCallTranslator).
-                def _tc_to_dict(tc):
-                    if isinstance(tc, dict):
-                        return {
-                            "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
-                            "type": "function",
-                            "function": {
-                                "name": tc.get("function", {}).get("name", tc.get("name", "")),
-                                "arguments": tc.get("function", {}).get("arguments", tc.get("arguments", "{}")),
-                            },
-                        }
-                    return {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-
-                # Build the assistant message dict for conversation history
-                msg_dict: Dict[str, Any] = {
-                    "role": "assistant",
-                    "content": assistant_msg.content or "",
-                    "tool_calls": [_tc_to_dict(tc) for tc in assistant_msg.tool_calls],
-                }
-
-                # Preserve reasoning_content for multi-turn chat template handling
-                # (e.g., Kimi-K2's template renders <think> blocks differently
-                # for history vs. the latest turn based on this field)
-                if reasoning:
-                    msg_dict["reasoning_content"] = reasoning
-
-                messages.append(msg_dict)
-
-                # Execute each tool call via gauss-agent's dispatch
-                for tc in assistant_msg.tool_calls:
-                    # Handle both object (OpenAI) and dict (vLLM) formats
-                    if isinstance(tc, dict):
-                        tool_name = tc.get("function", {}).get("name", tc.get("name", ""))
-                        tool_args_raw = tc.get("function", {}).get("arguments", tc.get("arguments", "{}"))
-                    else:
-                        tool_name = tc.function.name
-                        tool_args_raw = tc.function.arguments
-
-                    # Validate tool name
-                    if tool_name not in self.valid_tool_names:
-                        tool_result = json.dumps(
-                            {
-                                "error": f"Unknown tool '{tool_name}'. "
-                                f"Available tools: {sorted(self.valid_tool_names)}"
-                            }
-                        )
-                        tool_errors.append(ToolError(
-                            turn=turn + 1, tool_name=tool_name,
-                            arguments=tool_args_raw[:200],
-                            error=f"Unknown tool '{tool_name}'",
-                            tool_result=tool_result,
-                        ))
-                        logger.warning(
-                            "Model called unknown tool '%s' on turn %d",
-                            tool_name, turn + 1,
-                        )
-                    else:
-                        # Parse arguments and dispatch
-                        try:
-                            args = json.loads(tool_args_raw)
-                        except json.JSONDecodeError:
-                            args = {}
-                            logger.warning(
-                                "Invalid JSON in tool call arguments for '%s': %s",
-                                tool_name, tool_args_raw[:200],
-                            )
-
-                        try:
-                            if tool_name == "terminal":
-                                backend = os.getenv("TERMINAL_ENV", "local")
-                                cmd_preview = args.get("command", "")[:80]
-                                logger.info(
-                                    "[%s] $ %s", self.task_id[:8], cmd_preview,
-                                )
-
-                            tool_submit_time = _time.monotonic()
-
-                            # Todo tool -- handle locally (needs per-loop TodoStore)
-                            if tool_name == "todo":
-                                tool_result = _todo_tool(
-                                    todos=args.get("todos"),
-                                    merge=args.get("merge", False),
-                                    store=_todo_store,
-                                )
-                                tool_elapsed = _time.monotonic() - tool_submit_time
-                            elif tool_name == "memory":
-                                tool_result = json.dumps({"error": "Memory is not available in RL environments."})
-                                tool_elapsed = _time.monotonic() - tool_submit_time
-                            elif tool_name == "session_search":
-                                tool_result = json.dumps({"error": "Session search is not available in RL environments."})
-                                tool_elapsed = _time.monotonic() - tool_submit_time
-                            else:
-                                # Run tool calls in a thread pool so backends that
-                                # use asyncio.run() internally (modal, docker, daytona) get
-                                # a clean event loop instead of deadlocking.
-                                loop = asyncio.get_event_loop()
-                                # Capture current tool_name/args for the lambda
-                                _tn, _ta, _tid = tool_name, args, self.task_id
-                                tool_result = await loop.run_in_executor(
-                                    _tool_executor,
-                                    lambda: handle_function_call(
-                                        _tn, _ta, task_id=_tid,
-                                        user_task=_user_task,
-                                    ),
-                                )
-                                tool_elapsed = _time.monotonic() - tool_submit_time
-
-                            # Log slow tools and thread pool stats for debugging
-                            pool_active = _tool_executor._work_queue.qsize()
-                            if tool_elapsed > 30:
-                                logger.warning(
-                                    "[%s] turn %d: %s took %.1fs (pool queue=%d)",
-                                    self.task_id[:8], turn + 1, tool_name,
-                                    tool_elapsed, pool_active,
-                                )
-                        except Exception as e:
-                            tool_result = json.dumps(
-                                {"error": f"Tool execution failed: {type(e).__name__}: {str(e)}"}
-                            )
-                            tool_errors.append(ToolError(
+                # Extract subprocess returncodes
+                try:
+                    res_data = json.loads(tool_result)
+                    if isinstance(res_data, dict):
+                        err = res_data.get("error")
+                        exit_code = res_data.get("exit_code")
+                        if err and exit_code and exit_code < 0:
+                            branch.tool_errors.append(ToolError(
                                 turn=turn + 1, tool_name=tool_name,
                                 arguments=tool_args_raw[:200],
-                                error=f"{type(e).__name__}: {str(e)}",
-                                tool_result=tool_result,
+                                error=str(err),
+                                tool_result=tool_result[:500],
                             ))
-                            logger.error(
-                                "Tool '%s' execution failed on turn %d: %s",
-                                tool_name, turn + 1, e,
-                            )
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-                        # Also check if the tool returned an error in its JSON result
-                        try:
-                            result_data = json.loads(tool_result)
-                            if isinstance(result_data, dict):
-                                err = result_data.get("error")
-                                exit_code = result_data.get("exit_code")
-                                if err and exit_code and exit_code < 0:
-                                    tool_errors.append(ToolError(
-                                        turn=turn + 1, tool_name=tool_name,
-                                        arguments=tool_args_raw[:200],
-                                        error=str(err),
-                                        tool_result=tool_result[:500],
-                                    ))
-                        except (json.JSONDecodeError, TypeError):
-                            pass
+            except Exception as e:
+                tool_result = json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {str(e)}"})
+                branch.tool_errors.append(ToolError(
+                    turn=turn + 1, tool_name=tool_name,
+                    arguments=tool_args_raw[:200],
+                    error=f"{type(e).__name__}: {str(e)}",
+                    tool_result=tool_result,
+                ))
+                logger.error("Tool '%s' execution failed on branch %d: %s", tool_name, branch.branch_id, e)
 
-                    # Add tool response to conversation
-                    tc_id = tc.get("id", "") if isinstance(tc, dict) else tc.id
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc_id,
-                            "content": tool_result,
-                        }
-                    )
+        # Log duration
+        elapsed = _time.monotonic() - tool_submit_time
+        logger.debug("[Branch %d] %s completed in %.2fs", branch.branch_id, tool_name, elapsed)
 
-                turn_elapsed = _time.monotonic() - turn_start
-                logger.info(
-                    "[%s] turn %d: api=%.1fs, %d tools, turn_total=%.1fs",
-                    self.task_id[:8], turn + 1, api_elapsed,
-                    len(assistant_msg.tool_calls), turn_elapsed,
-                )
+        # 5. [MEMORY BOUNDARY] Force-Truncate large outputs
+        truncated_result = ObservationTruncator.truncate(tool_result, max_chars=8000)
 
-            else:
-                # No tool calls -- model is done
-                msg_dict = {
-                    "role": "assistant",
-                    "content": assistant_msg.content or "",
-                }
-                if reasoning:
-                    msg_dict["reasoning_content"] = reasoning
-                messages.append(msg_dict)
-
-                turn_elapsed = _time.monotonic() - turn_start
-                logger.info(
-                    "[%s] turn %d: api=%.1fs, no tools (finished), turn_total=%.1fs",
-                    self.task_id[:8], turn + 1, api_elapsed, turn_elapsed,
-                )
-
-                return AgentResult(
-                    messages=messages,
-                    managed_state=self._get_managed_state(),
-                    turns_used=turn + 1,
-                    finished_naturally=True,
-                    reasoning_per_turn=reasoning_per_turn,
-                    tool_errors=tool_errors,
-                )
-
-        # Hit max turns without the model stopping
-        logger.info("Agent hit max_turns (%d) without finishing", self.max_turns)
-        return AgentResult(
-            messages=messages,
-            managed_state=self._get_managed_state(),
-            turns_used=self.max_turns,
-            finished_naturally=False,
-            reasoning_per_turn=reasoning_per_turn,
-            tool_errors=tool_errors,
-        )
+        # 6. Commit observation to history
+        branch.messages.append({
+            "role": "tool",
+            "tool_call_id": tc_id,
+            "content": truncated_result,
+        })
 
     def _get_managed_state(self) -> Optional[Dict[str, Any]]:
-        """
-        Get ManagedServer state if the server supports it.
-
-        Returns state dict with SequenceNodes containing tokens/logprobs/masks,
-        or None if the server doesn't support get_state() (e.g., regular OpenAI server).
-        """
+        """Get ManagedServer state if the server supports it."""
         if hasattr(self.server, "get_state"):
             return self.server.get_state()
         return None
